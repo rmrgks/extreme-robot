@@ -278,6 +278,13 @@
       </geometry>
       <origin xyz="0 0 0" rpy="0 0 0"/>
     </collision>
+    <inertial>
+  <origin xyz="0 0 0"/>
+  <mass value="0.1"/>
+  <inertia ixx="0.0001" ixy="0" ixz="0"
+           iyy="0.0001" iyz="0"
+           izz="0.0001"/>
+</inertial>
   </link>
 
   <!-- ============ Left Finger ============ -->
@@ -303,6 +310,13 @@
       </geometry>
       <origin xyz="0 0.02 0" rpy="0 0 0"/>
     </collision>
+    <inertial>
+  <origin xyz="0 0.02 0"/>
+  <mass value="0.05"/>
+  <inertia ixx="0.00005" ixy="0" ixz="0"
+           iyy="0.00005" iyz="0"
+           izz="0.00005"/>
+</inertial>
   </link>
 
   <!-- ============ Right Finger ============ -->
@@ -328,5 +342,60 @@
       </geometry>
       <origin xyz="0 -0.02 0" rpy="0 0 0"/>
     </collision>
+ <inertial>
+  <origin xyz="0 -0.02 0"/>
+  <mass value="0.05"/>
+  <inertia ixx="0.00005" ixy="0" ixz="0"
+           iyy="0.00005" iyz="0"
+           izz="0.00005"/>
+</inertial>
   </link>
+<ros2_control name="RobotArmSystem" type="system">
+  <hardware>
+    <plugin>ign_ros2_control/IgnitionSystem</plugin>
+  </hardware>
+
+  <joint name="joint_1">
+    <command_interface name="position"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="joint_2">
+    <command_interface name="position"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="joint_3">
+    <command_interface name="position"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="joint_4">
+    <command_interface name="position"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="joint_5">
+    <command_interface name="position"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="joint_6">
+    <command_interface name="position"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+</ros2_control>
+
+<gazebo>
+  <plugin filename="libign_ros2_control-system.so"
+          name="ign_ros2_control::IgnitionROS2ControlPlugin">
+    <parameters>/extreme-robot/ros2_ws/src/robot_arm_description/config/controllers.yaml</parameters>
+  </plugin>
+</gazebo>
 </robot>
