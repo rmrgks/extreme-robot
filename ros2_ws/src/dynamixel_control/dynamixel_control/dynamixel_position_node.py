@@ -108,8 +108,7 @@ class DynamixelPositionNode(Node):
         )
 
         # 0.1초마다 상태 읽기
-        self.timer = self.create_timer(0.1, self.read_state)
-
+        #self.timer = self.create_timer(0.1, self.read_state)
         self.get_logger().info("Dynamixel node started")
 
     def goal_callback(self, msg):
@@ -217,7 +216,7 @@ class DynamixelPositionNode(Node):
             joint_msg.velocity.append(float(velocity))
             joint_msg.effort.append(float(current))
 
-        state_msg.data = [int(x) for x in state_data]
+        state_msg.data = [int(x) if x is not None else 0 for x in state_data]
 
         self.state_pub.publish(state_msg)
         self.joint_state_pub.publish(joint_msg)
