@@ -24,8 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
- 'position_node = dynamixel_control.dynamixel_position_node:main',       
-'yolo_bridge = dynamixel_control.yolo_to_dynamixel_bridge:main',
- ],
+            'position_node = dynamixel_control.dynamixel_position_node:main',
+            'yolo_bridge = dynamixel_control.yolo_to_dynamixel_bridge:main',
+            'yolo_detection = dynamixel_control.yolo_detection_node:main',
+        ],
     },
 )

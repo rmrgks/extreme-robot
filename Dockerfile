@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y \
     nano \
     && rm -rf /var/lib/apt/lists/*
 
+RUN pip3 install ultralytics
+
 # ROS 2 환경 자동 소싱
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc
 
