@@ -7,7 +7,7 @@ class YoloBridge(Node):
     def __init__(self):
         super().__init__("yolo_bridge")
 
-        self.image_center_x = 640
+        self.image_center_x = 320
         self.center_position = 2048
         self.gain = 2
 

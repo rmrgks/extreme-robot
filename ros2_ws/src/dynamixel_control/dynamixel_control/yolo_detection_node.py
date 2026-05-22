@@ -12,12 +12,13 @@ class YoloDetectionNode(Node):
         super().__init__('yolo_detection')
 
         self.declare_parameter('camera_device', 0)
-        self.declare_parameter('image_width', 1280)
-        self.declare_parameter('image_height', 720)
+        self.declare_parameter('image_width', 640)
+        self.declare_parameter('image_height', 480)
         self.declare_parameter('model_path', 'yolov8n.pt')
-        self.declare_parameter('target_class', 'bottle')
+        self.declare_parameter('target_class', 'cell phone')
         self.declare_parameter('conf_threshold', 0.5)
         self.declare_parameter('publish_debug_image', True)
+        self.declare_parameter('show_window', True)
 
         camera_device = self.get_parameter('camera_device').value
         image_width = self.get_parameter('image_width').value
@@ -30,7 +31,7 @@ class YoloDetectionNode(Node):
             self.get_logger().error(f'Failed to load YOLO model: {e}')
             raise
 
-        self.cap = cv2.VideoCapture(camera_device)
+        self.cap = cv2.VideoCapture(camera_device, cv2.CAP_V4L2)
         if not self.cap.isOpened():
             self.get_logger().error(f'Cannot open camera device: {camera_device}')
             raise RuntimeError(f'Cannot open camera device: {camera_device}')
@@ -52,11 +53,13 @@ class YoloDetectionNode(Node):
             target_class = self.get_parameter('target_class').value
             conf_threshold = self.get_parameter('conf_threshold').value
             publish_debug = self.get_parameter('publish_debug_image').value
+            show_window = self.get_parameter('show_window').value
 
             results = self.model.predict(frame, verbose=False)
 
             best_box = None
             best_conf = -1.0
+            display_frame = frame.copy()
 
             for result in results:
                 for box in result.boxes:
@@ -64,10 +67,22 @@ class YoloDetectionNode(Node):
                     cls_name = self.model.names[cls_id]
                     conf = float(box.conf[0])
 
-                    if cls_name == target_class and conf >= conf_threshold:
+                    if conf < conf_threshold:
+                        continue
+
+                    x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
+
+                    if cls_name == target_class:
+                        color = (0, 255, 0)  # 초록 — 추적 대상
                         if conf > best_conf:
                             best_conf = conf
                             best_box = box
+                    else:
+                        color = (255, 165, 0)  # 파랑 — 기타 객체
+
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(display_frame, f'{cls_name} {conf:.2f}', (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             if best_box is not None:
                 x1, y1, x2, y2 = [int(v) for v in best_box.xyxy[0]]
@@ -78,21 +93,24 @@ class YoloDetectionNode(Node):
                 msg.data = [cx, cy]
                 self.pub_center.publish(msg)
 
+                self.get_logger().info(
+                    f'{target_class} detected — center=({cx}, {cy}), conf={best_conf:.2f}'
+                )
+
+                cv2.circle(display_frame, (cx, cy), 5, (0, 0, 255), -1)
+
                 if publish_debug:
-                    cls_id = int(best_box.cls[0])
-                    cls_name = self.model.names[cls_id]
-                    label = f'{cls_name} {best_conf:.2f}'
-
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, label, (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
-
-                    img_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+                    img_msg = self.bridge.cv2_to_imgmsg(display_frame, encoding='bgr8')
                     self.pub_image.publish(img_msg)
+
+            if show_window:
+                cv2.imshow('YOLO Detection', display_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
     def destroy_node(self):
         self.cap.release()
+        cv2.destroyAllWindows()
         super().destroy_node()
 
 

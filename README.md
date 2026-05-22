@@ -314,6 +314,131 @@ sudo chown -R $USER:$USER ros2_ws/
 
 ---
 
+## YOLO 스마트폰 감지 노드
+
+USB 카메라로 스마트폰을 감지하고, 화면 중심 좌표를 ROS 2 토픽으로 발행하는 파이프라인입니다.
+감지 결과(`/yolo/target_center`)를 Dynamixel 제어 노드가 구독해 카메라가 대상을 추적합니다.
+
+### 사전 확인
+
+#### 1. USB 카메라 연결 확인 (호스트)
+
+```bash
+ls /dev/video*
+# /dev/video0  /dev/video1  /dev/video2  /dev/video3
+# 숫자가 많을수록 최근에 연결된 장치 (보통 video2, video3이 USB 카메라)
+```
+
+#### 2. docker-compose.yml — 카메라 장치 마운트 확인
+
+컨테이너를 **시작하기 전에** 카메라가 연결되어 있어야 장치가 컨테이너 안에 보입니다.
+`docker-compose.yml`에 다음 항목이 있는지 확인하세요:
+
+```yaml
+devices:
+  - /dev/video0:/dev/video0
+  - /dev/video1:/dev/video1
+  - /dev/video2:/dev/video2
+  - /dev/video3:/dev/video3
+```
+
+없으면 추가 후 컨테이너를 재시작합니다:
+
+```bash
+docker compose down
+docker compose up -d
+```
+
+#### 3. 사용 가능한 카메라 인덱스 확인 (컨테이너 안)
+
+```bash
+python3 -c "
+import cv2
+for i in range(4):
+    cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+    print(f'video{i}:', cap.isOpened())
+    cap.release()
+"
+# True가 나오는 인덱스 중 가장 큰 번호가 USB 카메라 (보통 2)
+```
+
+---
+
+### 빌드
+
+```bash
+# 컨테이너 안에서
+cd /root/ros2_ws
+colcon build --packages-select dynamixel_control
+source install/setup.bash
+```
+
+---
+
+### 실행
+
+#### 터미널 1 — YOLO 감지 노드 시작
+
+```bash
+# 컨테이너 안에서
+source /root/ros2_ws/install/setup.bash
+ros2 run dynamixel_control yolo_detection --ros-args -p camera_device:=2 -p publish_debug_image:=false
+```
+
+노드가 시작되면 카메라 프레임을 읽으며 스마트폰 감지를 시작합니다. 별도 출력 없이 대기 중인 것이 정상입니다.
+
+#### 터미널 2 — 감지 결과 확인
+
+```bash
+# 새 터미널에서 컨테이너 진입
+docker exec -it ros2_humble bash
+source /root/ros2_ws/install/setup.bash
+
+# 토픽 목록 확인
+ros2 topic list
+# /yolo/target_center
+# /yolo/detection_image
+
+# 스마트폰을 카메라 앞에 들면 좌표 출력
+ros2 topic echo /yolo/target_center
+# data: [320, 240]   ← [x, y] 픽셀 좌표
+```
+
+---
+
+### 파라미터
+
+| 파라미터             | 기본값       | 설명                                      |
+| -------------------- | ------------ | ----------------------------------------- |
+| `camera_device`      | `0`          | `/dev/videoN`의 N 값 (보통 `2`)           |
+| `image_width`        | `640`        | 카메라 캡처 해상도 너비 (px)              |
+| `image_height`       | `480`        | 카메라 캡처 해상도 높이 (px)              |
+| `model_path`         | `yolov8n.pt` | YOLO 모델 파일 경로                       |
+| `target_class`       | `cell phone` | 감지할 COCO 클래스 이름                   |
+| `conf_threshold`     | `0.5`        | 감지 신뢰도 임계값 (0.0 ~ 1.0)            |
+| `publish_debug_image`| `true`       | 바운딩박스 이미지를 토픽으로 발행할지 여부|
+
+실행 시 `--ros-args -p 파라미터명:=값` 형태로 변경할 수 있습니다:
+
+```bash
+ros2 run dynamixel_control yolo_detection --ros-args \
+  -p camera_device:=2 \
+  -p target_class:=cell phone \
+  -p conf_threshold:=0.4 \
+  -p publish_debug_image:=false
+```
+
+---
+
+### 발행 토픽
+
+| 토픽                    | 메시지 타입             | 내용                                    |
+| ----------------------- | ----------------------- | --------------------------------------- |
+| `/yolo/target_center`   | `std_msgs/Int32MultiArray` | 감지된 객체 중심 좌표 `[x, y]` (px)  |
+| `/yolo/detection_image` | `sensor_msgs/Image`     | 바운딩박스가 그려진 디버그 이미지       |
+
+---
+
 ## 브랜치 전략 (권장)
 
 ```
