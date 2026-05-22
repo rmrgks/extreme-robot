@@ -217,7 +217,7 @@ class DynamixelPositionNode(Node):
             joint_msg.velocity.append(float(velocity))
             joint_msg.effort.append(float(current))
 
-        state_msg.data = state_data
+        state_msg.data = [int(x) for x in state_data]
 
         self.state_pub.publish(state_msg)
         self.joint_state_pub.publish(joint_msg)
