@@ -44,6 +44,12 @@ docker compose build
 첫 빌드 시 ROS 2 베이스 이미지(약 3~4GB)를 받기 때문에 **10~20분** 걸립니다.
 Dockerfile이 변경되지 않았다면 두 번째부터는 캐시로 수 초 내에 끝납니다.
 
+> **이미 빌드한 적 있다면 반드시 재빌드하세요.**
+> YOLO 파이프라인 추가로 Dockerfile이 변경되었습니다 (ultralytics, numpy 핀 추가).
+> ```bash
+> docker compose build --no-cache
+> ```
+
 ### 3. 컨테이너 시작
 
 환경에 따라 docker-compose 파일을 선택합니다:
@@ -314,10 +320,33 @@ sudo chown -R $USER:$USER ros2_ws/
 
 ---
 
-## YOLO 스마트폰 감지 노드
+## YOLO 카메라-Dynamixel 추적 파이프라인
 
-USB 카메라로 스마트폰을 감지하고, 화면 중심 좌표를 ROS 2 토픽으로 발행하는 파이프라인입니다.
-감지 결과(`/yolo/target_center`)를 Dynamixel 제어 노드가 구독해 카메라가 대상을 추적합니다.
+USB 카메라로 스마트폰을 감지하고 Dynamixel 모터가 카메라를 추적하는 파이프라인입니다.
+
+```
+카메라 → yolo_detection_node → /yolo/target_center
+                                        ↓
+               dynamixel_position_node ← yolo_to_dynamixel_bridge
+```
+
+### Docker 이미지 변경사항
+
+이 기능은 Dockerfile에 다음 의존성이 추가된 이미지가 필요합니다:
+
+- `ultralytics` (YOLOv8)
+- `numpy<2` (cv_bridge 호환 핀)
+- pip의 `opencv-python` / `opencv-python-headless` 제거 (apt의 ROS opencv와 충돌 방지)
+
+이전에 이미지를 빌드한 적 있으면 반드시 재빌드하세요:
+
+```bash
+docker compose build --no-cache
+```
+
+`privileged: true` 설정 덕분에 USB 카메라(`/dev/video*`)와 Dynamixel(`/dev/ttyUSB0`)은 별도 `devices:` 설정 없이 컨테이너 안에서 바로 접근 가능합니다. 단, **컨테이너 시작 전에 USB 장치를 연결**해두어야 합니다.
+
+---
 
 ### 사전 확인
 
@@ -326,30 +355,10 @@ USB 카메라로 스마트폰을 감지하고, 화면 중심 좌표를 ROS 2 토
 ```bash
 ls /dev/video*
 # /dev/video0  /dev/video1  /dev/video2  /dev/video3
-# 숫자가 많을수록 최근에 연결된 장치 (보통 video2, video3이 USB 카메라)
+# 숫자가 많을수록 최근에 연결된 장치 (보통 video2 또는 video3이 USB 카메라)
 ```
 
-#### 2. docker-compose.yml — 카메라 장치 마운트 확인
-
-컨테이너를 **시작하기 전에** 카메라가 연결되어 있어야 장치가 컨테이너 안에 보입니다.
-`docker-compose.yml`에 다음 항목이 있는지 확인하세요:
-
-```yaml
-devices:
-  - /dev/video0:/dev/video0
-  - /dev/video1:/dev/video1
-  - /dev/video2:/dev/video2
-  - /dev/video3:/dev/video3
-```
-
-없으면 추가 후 컨테이너를 재시작합니다:
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-#### 3. 사용 가능한 카메라 인덱스 확인 (컨테이너 안)
+#### 2. 사용 가능한 카메라 인덱스 확인 (컨테이너 안)
 
 ```bash
 python3 -c "
@@ -377,65 +386,76 @@ source install/setup.bash
 
 ### 실행
 
-#### 터미널 1 — YOLO 감지 노드 시작
+#### 터미널 1 — YOLO 감지 노드
 
 ```bash
 # 컨테이너 안에서
 source /root/ros2_ws/install/setup.bash
-ros2 run dynamixel_control yolo_detection --ros-args -p camera_device:=2 -p publish_debug_image:=false
+ros2 run dynamixel_control yolo_detection --ros-args -p camera_device:=2
 ```
 
-노드가 시작되면 카메라 프레임을 읽으며 스마트폰 감지를 시작합니다. 별도 출력 없이 대기 중인 것이 정상입니다.
+노드가 시작되면 카메라 윈도우가 열리고 감지를 시작합니다. `q`를 누르면 종료됩니다.
+GUI 없는 환경(서버, headless)에서는 `-p show_window:=false`를 추가하세요.
 
-#### 터미널 2 — 감지 결과 확인
+#### 터미널 2 — YOLO-Dynamixel 브릿지
 
 ```bash
-# 새 터미널에서 컨테이너 진입
+docker exec -it ros2_humble bash
+source /root/ros2_ws/install/setup.bash
+ros2 run dynamixel_control yolo_bridge
+```
+
+#### 터미널 3 — Dynamixel 모터 제어
+
+```bash
+docker exec -it ros2_humble bash
+source /root/ros2_ws/install/setup.bash
+ros2 run dynamixel_control dynamixel_position
+```
+
+#### 감지 결과 확인
+
+```bash
+# 새 터미널에서
 docker exec -it ros2_humble bash
 source /root/ros2_ws/install/setup.bash
 
-# 토픽 목록 확인
-ros2 topic list
-# /yolo/target_center
-# /yolo/detection_image
-
-# 스마트폰을 카메라 앞에 들면 좌표 출력
 ros2 topic echo /yolo/target_center
-# data: [320, 240]   ← [x, y] 픽셀 좌표
+# data: [320, 240]   ← 감지된 객체 중심 [x, y] 픽셀 좌표
 ```
 
 ---
 
-### 파라미터
+### 파라미터 (`yolo_detection_node`)
 
-| 파라미터             | 기본값       | 설명                                      |
-| -------------------- | ------------ | ----------------------------------------- |
-| `camera_device`      | `0`          | `/dev/videoN`의 N 값 (보통 `2`)           |
-| `image_width`        | `640`        | 카메라 캡처 해상도 너비 (px)              |
-| `image_height`       | `480`        | 카메라 캡처 해상도 높이 (px)              |
-| `model_path`         | `yolov8n.pt` | YOLO 모델 파일 경로                       |
-| `target_class`       | `cell phone` | 감지할 COCO 클래스 이름                   |
-| `conf_threshold`     | `0.5`        | 감지 신뢰도 임계값 (0.0 ~ 1.0)            |
-| `publish_debug_image`| `true`       | 바운딩박스 이미지를 토픽으로 발행할지 여부|
-
-실행 시 `--ros-args -p 파라미터명:=값` 형태로 변경할 수 있습니다:
+| 파라미터              | 기본값       | 설명                                        |
+| --------------------- | ------------ | ------------------------------------------- |
+| `camera_device`       | `0`          | `/dev/videoN`의 N 값 (보통 `2`)             |
+| `image_width`         | `640`        | 카메라 캡처 해상도 너비 (px)                |
+| `image_height`        | `480`        | 카메라 캡처 해상도 높이 (px)                |
+| `model_path`          | `yolov8n.pt` | YOLO 모델 파일 경로                         |
+| `target_class`        | `cell phone` | 감지할 COCO 클래스 이름                     |
+| `conf_threshold`      | `0.5`        | 감지 신뢰도 임계값 (0.0 ~ 1.0)              |
+| `publish_debug_image` | `true`       | 바운딩박스 이미지를 토픽으로 발행할지 여부  |
+| `show_window`         | `true`       | 감지 윈도우 표시 여부 (headless 환경엔 false) |
 
 ```bash
 ros2 run dynamixel_control yolo_detection --ros-args \
   -p camera_device:=2 \
-  -p target_class:=cell phone \
+  -p target_class:="cell phone" \
   -p conf_threshold:=0.4 \
-  -p publish_debug_image:=false
+  -p show_window:=false
 ```
 
 ---
 
 ### 발행 토픽
 
-| 토픽                    | 메시지 타입             | 내용                                    |
-| ----------------------- | ----------------------- | --------------------------------------- |
-| `/yolo/target_center`   | `std_msgs/Int32MultiArray` | 감지된 객체 중심 좌표 `[x, y]` (px)  |
-| `/yolo/detection_image` | `sensor_msgs/Image`     | 바운딩박스가 그려진 디버그 이미지       |
+| 토픽                    | 메시지 타입                  | 내용                                  |
+| ----------------------- | ---------------------------- | ------------------------------------- |
+| `/yolo/target_center`   | `std_msgs/Int32MultiArray`   | 감지된 객체 중심 좌표 `[x, y]` (px)  |
+| `/yolo/detection_image` | `sensor_msgs/Image`          | 바운딩박스가 그려진 디버그 이미지     |
+| `/dynamixel/goal_position` | `std_msgs/Int32MultiArray` | 모터 ID + 목표 위치 `[id, position]` |
 
 ---
 

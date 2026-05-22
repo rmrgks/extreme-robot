@@ -16,9 +16,3 @@ services:
       - ./ros2_ws:/root/ros2_ws
     network_mode: host
     privileged: true
-    devices:
-      - /dev/video0:/dev/video0
-      - /dev/video1:/dev/video1
-      - /dev/video2:/dev/video2
-      - /dev/video3:/dev/video3
-      - /dev/ttyUSB0:/dev/ttyUSB0
