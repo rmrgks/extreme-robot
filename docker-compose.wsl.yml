@@ -9,6 +9,7 @@ services:
       - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
       - XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
       - QT_X11_NO_MITSHM=1
+      - QT_QPA_PLATFORM=xcb
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /mnt/wslg:/mnt/wslg:rw
