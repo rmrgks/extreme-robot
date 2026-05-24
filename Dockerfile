@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y \
     ros-humble-rqt \
     ros-humble-rqt-graph \
     ros-humble-joint-state-publisher-gui \
+    ros-humble-dynamixel-sdk \
+    ros-humble-dynamixel-workbench \
+    python3-serial \
     python3-pip \
     nano \
     && rm -rf /var/lib/apt/lists/*
