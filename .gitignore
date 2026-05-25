@@ -15,3 +15,6 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# 요구사항/문서 (계속 바뀌고 버전관리 불필요)
+docs/
