@@ -11,7 +11,7 @@ class DynamixelGuiNode(Node):
 
         self.publisher = self.create_publisher(
             Int32MultiArray,
-            '/dynamixel_goal',
+	    '/dynamixel/goal_position',
             10
         )
 
