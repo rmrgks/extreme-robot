@@ -112,41 +112,46 @@ class DynamixelPositionNode(Node):
         self.get_logger().info("Dynamixel node started")
 
     def goal_callback(self, msg):
-        """목표 위치 명령을 받아 Dynamixel에 전송."""
+        """목표 위치 명령을 받아 여러 Dynamixel에 전송."""
         if len(msg.data) < 2:
-            self.get_logger().error("Message must be [id, goal_position]")
+            self.get_logger().error("Message must be [id, pos, id, pos, ...]")
             return
 
-        dxl_id = int(msg.data[0])
-        goal_position = int(msg.data[1])
-
-        if dxl_id not in DXL_IDS:
-            self.get_logger().error(f"Unknown Dynamixel ID: {dxl_id}")
+        if len(msg.data) % 2 != 0:
+            self.get_logger().error("Message length must be even")
             return
 
-        goal_position = max(0, min(4095, goal_position))
+        for i in range(0, len(msg.data), 2):
+            dxl_id = int(msg.data[i])
+            goal_position = int(msg.data[i + 1])
 
-        result, error = self.packet_handler.write4ByteTxRx(
-            self.port_handler,
-            dxl_id,
-            ADDR_GOAL_POSITION,
-            goal_position,
-        )
+            if dxl_id not in DXL_IDS:
+                self.get_logger().error(f"Unknown Dynamixel ID: {dxl_id}")
+                continue
 
-        if result != 0:
-            self.get_logger().error(
-                f"Goal position failed ID {dxl_id}: "
-                f"{self.packet_handler.getTxRxResult(result)}"
+            goal_position = max(0, min(4095, goal_position))
+
+            result, error = self.packet_handler.write4ByteTxRx(
+                self.port_handler,
+                dxl_id,
+                ADDR_GOAL_POSITION,
+                goal_position,
             )
-        elif error != 0:
-            self.get_logger().error(
-                f"Goal position error ID {dxl_id}: "
-                f"{self.packet_handler.getRxPacketError(error)}"
-            )
-        else:
-            self.get_logger().info(
-                f"Goal sent -> ID:{dxl_id} POS:{goal_position}"
-            )
+
+            if result != 0:
+                self.get_logger().error(
+                    f"Goal position failed ID {dxl_id}: "
+                    f"{self.packet_handler.getTxRxResult(result)}"
+                )
+            elif error != 0:
+                self.get_logger().error(
+                    f"Goal position error ID {dxl_id}: "
+                    f"{self.packet_handler.getRxPacketError(error)}"
+                )
+            else:
+                self.get_logger().info(
+                    f"Goal sent -> ID:{dxl_id} POS:{goal_position}"
+                )
 
     def read_state(self):
         """모터의 현재 위치/속도/전류/온도를 읽어서 publish."""
