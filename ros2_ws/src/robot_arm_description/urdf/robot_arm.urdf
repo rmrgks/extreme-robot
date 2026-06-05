@@ -115,7 +115,7 @@
     <parent link="link_2"/>
     <child link="link_3"/>
     <origin xyz="0 0 0.2" rpy="0 0 0"/>
-    <axis xyz="0 0 1"/>
+    <axis xyz="0 1 0"/>
     <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
   </joint>
 
@@ -187,7 +187,7 @@
     <parent link="link_4"/>
     <child link="link_5"/>
     <origin xyz="0 0 0.05" rpy="0 0 0"/>
-    <axis xyz="0 1 0"/>
+    <axis xyz="0 0 1"/>
     <limit lower="-3.14" upper="3.14" effort="10" velocity="1.0"/>
   </joint>
 
@@ -350,6 +350,10 @@
            izz="0.00005"/>
 </inertial>
   </link>
+<!-- [비활성화] Gazebo Ignition용 ros2_control 블록.
+     MoveIt config(robot_arm.ros2_control.xacro)의 mock(FakeSystem)과 ros2_control이 중복되어
+     ros2_control_node가 ign_ros2_control/IgnitionSystem을 먼저 로드→크래시하므로 주석 처리함.
+     Gazebo Ignition 시뮬레이션을 쓸 때만 되살릴 것. (아래 gazebo 플러그인의 parameters 경로도 /root/ros2_ws/로 수정 필요)
 <ros2_control name="RobotArmSystem" type="system">
   <hardware>
     <plugin>mock_components/GenericSystem</plugin>
@@ -398,4 +402,5 @@
     <parameters>/extreme-robot/ros2_ws/src/robot_arm_description/config/controllers.yaml</parameters>
   </plugin>
 </gazebo>
+-->
 </robot>

@@ -9,6 +9,8 @@ moveit_simple_controller_manager:
 
   arm_controller:
     type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
     joints:
       - joint_1
       - joint_2
@@ -18,6 +20,8 @@ moveit_simple_controller_manager:
       - joint_6
   gripper_controller:
     type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
     joints:
       - left_finger_joint
       - right_finger_joint

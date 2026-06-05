@@ -14,11 +14,24 @@ RUN apt-get update && apt-get install -y \
     ros-humble-rqt \
     ros-humble-rqt-graph \
     ros-humble-joint-state-publisher-gui \
+    ros-humble-dynamixel-sdk \
+    ros-humble-dynamixel-workbench \
+    python3-serial \
     python3-pip \
     nano \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install "numpy<2" ultralytics && pip3 uninstall -y opencv-python opencv-python-headless
+
+# MoveIt (로봇팔 경로계획) + ros2_control (mock 하드웨어/컨트롤러)
+# - ros-humble-moveit: move_group, OMPL, KDL IK, RViz MotionPlanning 플러그인
+# - ros-humble-ros2-control: controller_manager, mock_components/GenericSystem
+# - ros-humble-ros2-controllers: joint_trajectory_controller, joint_state_broadcaster
+RUN apt-get update && apt-get install -y \
+    ros-humble-moveit \
+    ros-humble-ros2-control \
+    ros-humble-ros2-controllers \
+    && rm -rf /var/lib/apt/lists/*
 
 # ROS 2 환경 자동 소싱
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc
