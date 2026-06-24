@@ -29,6 +29,7 @@ RUN pip3 install "numpy<2" ultralytics && pip3 uninstall -y opencv-python opencv
 # - ros-humble-ros2-controllers: joint_trajectory_controller, joint_state_broadcaster
 RUN apt-get update && apt-get install -y \
     ros-humble-moveit \
+    ros-humble-moveit-configs-utils \
     ros-humble-ros2-control \
     ros-humble-ros2-controllers \
     && rm -rf /var/lib/apt/lists/*
