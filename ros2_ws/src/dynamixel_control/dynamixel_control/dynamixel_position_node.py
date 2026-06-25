@@ -28,16 +28,14 @@ ADDR_PRESENT_TEMPERATURE = 146
 
 TORQUE_ENABLE = 1
 
-# 사용하는 모터 ID
-DXL_IDS = [0, 1, 2, 3, 4]
+# 사용하는 모터 ID (URDF 기준 active joint 3개: Motor0_1=0, Motor_1=1, Motor1_1=2)
+DXL_IDS = [0, 1, 2]
 
 # URDF joint 이름과 모터 ID 순서를 맞춤
 JOINT_NAMES = [
     "joint_1",
     "joint_2",
     "joint_3",
-    "joint_4",
-    "joint_5",
 ]
 
 

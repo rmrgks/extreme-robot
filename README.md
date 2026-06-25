@@ -294,3 +294,80 @@ git checkout -b feat/vision     # 새 기능 브랜치
 git add . && git commit -m "feat: 화재 타겟 인식"
 git push -u origin feat/vision  # 이후 GitHub에서 PR
 ```
+
+---
+
+## 8. URDF 교체 후 테스트 절차
+
+CAD에서 새 URDF·mesh를 가져온 뒤, 커밋 전에 아래 4단계로 검증합니다.
+
+> **현재 구성** — 실물 STL mesh 적용, 활성 관절 3개(`joint_1` ~ `joint_3`), 엔드이펙터 `Link4_1_1`
+
+### 8-1. 빌드
+
+```bash
+# 컨테이너 안에서
+cd /root/ros2_ws
+colcon build --packages-select robot_arm_description robot_arm_moveit_config dynamixel_control
+source install/setup.bash
+```
+
+빌드 에러가 나면 `rosdep install --from-paths src --ignore-src -r -y` 로 의존성을 먼저 해결하세요.
+
+### 8-2. URDF 문법 검증
+
+```bash
+check_urdf install/robot_arm_description/share/robot_arm_description/urdf/robot_arm.urdf
+```
+
+```
+robot name is: robot_arm
+------------- Successfully Parsed XML ---------------
+root Link: base_link ...
+```
+
+위와 같이 `Successfully Parsed` 가 나오면 통과입니다.
+
+### 8-3. RViz 시각화 (URDF + mesh)
+
+```bash
+ros2 launch robot_arm_description display.launch.py
+```
+
+RViz가 열리면 한 번만 아래를 설정합니다:
+
+1. **Fixed Frame** → `base_link`
+2. **Add → RobotModel** 추가
+3. RobotModel의 **Description Topic** 에서 **Durability Policy** → `Transient Local`
+
+**확인 포인트**
+
+- 로봇이 STL 실물 형상(회색)으로 보이는지
+- joint_state_publisher_gui 슬라이더로 `joint_1` / `joint_2` / `joint_3` 를 움직이면 해당 관절만 반응하는지
+- 빨간 에러 없이 모든 링크가 렌더링되는지
+
+### 8-4. MoveIt mock demo (경로 계획)
+
+```bash
+ros2 launch robot_arm_moveit_config demo.launch.py
+```
+
+**확인 포인트**
+
+- 터미널 로그에서 `arm_controller`, `joint_state_broadcaster` 가 `active` 상태인지 확인
+- MotionPlanning 패널 → Planning Group `arm` → **Goal State: random valid** → **Plan** 클릭 → 궤적 애니메이션이 나오는지
+- **Execute** 후 joint_states 토픽에 `joint_1` ~ `joint_3` 만 발행되는지
+
+```bash
+# 별도 터미널에서
+ros2 topic echo /joint_states
+```
+
+### 트러블슈팅
+
+| 증상 | 원인 | 조치 |
+|------|------|------|
+| 링크가 빨간색으로 표시됨 | mesh STL 파일 경로 불일치 | `ls install/.../meshes/` 로 파일명 확인 |
+| IK 해 없음 | `joint_1`이 `continuous` 타입 | URDF에서 `revolute` + `<limit>` 추가 고려 |
+| 컨트롤러가 inactive | `ros2_controllers.yaml` 관절명 불일치 | `ros2 control list_controllers` 로 상태 확인 |
+| RobotModel이 안 보임 | Durability 설정 누락 | RViz에서 `Transient Local` 로 변경 |
