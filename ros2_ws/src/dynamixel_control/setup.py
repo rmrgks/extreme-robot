@@ -27,7 +27,6 @@ setup(
             'position_node = dynamixel_control.dynamixel_position_node:main',
             'yolo_bridge = dynamixel_control.yolo_to_dynamixel_bridge:main',
             'yolo_detection = dynamixel_control.yolo_detection_node:main',
-            'perception_node = dynamixel_control.perception_node:main',
         ],
     },
 )
