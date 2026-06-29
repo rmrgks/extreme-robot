@@ -19,7 +19,5 @@ Thumbs.db
 # 요구사항/문서 (계속 바뀌고 버전관리 불필요)
 docs/
 
-# 개인 작업 파일 (공유 안 함)
-CLAUDE.md
-WORK_STATUS.md
-CLAUDE_Plan.md
+# FSM 원본 (용량 커서 커밋 제외, 로컬/별도 공유)
+*.drawio
