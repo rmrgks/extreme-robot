@@ -105,42 +105,42 @@ airplane(화이트리스트 제외)·person 0.46(min_conf 미달) 정상 탈락.
 
 | 항목 | 결정 |
 |------|------|
-| A. 모션 경로 | **position_node 직접 제어** (MoveIt 실HW 인터페이스 안 씀) |
-| B. 그리퍼 | **Dynamixel** — 전류로 파지/DROP 판정 |
+| A. 모션 경로 | **MoveIt 단일 경로(결정 '가')** — FSM→MoveIt(IK·계획)→`arm_controller`→upstream `moveit_dynamixel_bridge`→서보. *(당초 position_node 직접(A)이었으나 upstream #9에 브릿지 존재 발견 → 가로 전환)* |
+| B. 그리퍼 | **Dynamixel** — `/joint_states` effort(전류)로 파지/DROP 판정 |
 | C. status enum | **보류** — 잠정값으로 두고 파워트레인 팀 합의 후 확정 |
 | D. 구간4 제설 주체 | **미정** (팔로 치울지/밟고 갈지) |
 | E. 95mm 박스 파지 | 그리퍼로 **가능** |
 
-### 팔 FSM 스켈레톤 작성: `arm_fsm_node.py`
+### 팔 FSM 스켈레톤 작성: `arm_fsm_node.py` (가 방향)
 
-**파일**: `src/dynamixel_control/dynamixel_control/arm_fsm_node.py` (entry point `arm_fsm`, setup.py 등록 완료). 문법 검증 통과(AST), **빌드/런타임 미검증**.
+**파일**: `src/dynamixel_control/dynamixel_control/arm_fsm_node.py` (entry point `arm_fsm`, setup.py 등록 완료). **빌드 성공 + mock 스모크테스트 통과**(2026-06-29, 컨테이너).
 
 - §4 상태표 12개 상태(`IDLE/PERCEIVE/PLAN/DESCEND/GRASP_CHECK/LIFT/CARRY/REGRASP/RELEASE/DONE/ABORT/LOCKED`) Enum + `_do_<state>()` 디스패치.
-- 토픽 I/O: 구독 `/pick_target`(latched)·`/arrival_status`·`/chassis_mode`·`/dynamixel/state`, 발행 `/dynamixel/goal_position`·`/arm_status`.
-- 전류 기반 파지/DROP 판정, 자세 락 인터럽트(거친지형/추종 모드), 재파지 루프(`max_regrasp` 초과 시 ABORT) — 골격 동작.
-- status/mode 문자열은 파일 상단에 모아둔 **잠정값**(파워트레인 합의 전).
+- 액추에이션(가): 팔=MoveIt `move_action`(MoveGroup, pose goal), 그리퍼=`/gripper_controller/follow_joint_trajectory`, 피드백=`/joint_states.effort`.
+- 토픽 I/O: 구독 `/pick_target`(latched)·`/arrival_status`·`/chassis_mode`·`/joint_states`, 발행 `/arm_status`.
+- effort 기반 파지/DROP 판정, 자세 락(진행 모션 취소+홀드), 재파지 루프 — 골격 동작.
+- 스모크테스트: `IDLE→PERCEIVE→PLAN→DESCEND` 전이 확인, move_group 없으면 `move_action 미준비` 경고 후 대기(정상).
 
-### Phase 3 선결 과제 / TODO (스켈레톤에 스텁으로 남김)
+### Phase 3 선결 과제 / TODO (대부분 **브릿지 측**으로 이관)
 
-- [ ] **`_solve_ik()` 실제 구현** — (a) KDL/ikpy 직접 vs (b) MoveIt plan만 받아 관절각 추출. **다음 분기점.**
-- [ ] **position_node에 그리퍼 ID 추가** — 현재 `DXL_IDS=[0,1,2]`(joint_1~3)뿐. `gripper_id` torque enable + `/dynamixel/state`에 포함해야 전류 피드백 들어옴.
-- [ ] 그리퍼 open/close raw 값 + 전류 임계값(`grasp_current_thresh`/`drop_current_thresh`) **실측 캘리브**.
-- [ ] DESCEND/LIFT 실제 궤적(저속 하강 0.02m/s 등) — 현재 타임아웃/전류로 단계 진행만.
-- [ ] status enum 파워트레인 팀 합의(§6-C) → 파일 상단 상수 교체.
-- [ ] 구간4 제설 주체 결정(D) — 팔이면 두 번째 파지류 동작 설계.
+- [ ] **브릿지 effort(전류) 발행** — `moveit_dynamixel_bridge`가 현재 position만 발행 → PRESENT_CURRENT를 `/joint_states.effort`에 채워야 파지/DROP 판정 가능. **최우선.**
+- [ ] **브릿지/컨트롤러에 그리퍼 실행 경로 추가** + 전류 임계값(`grasp_effort_thresh`/`drop_effort_thresh`) 실측 캘리브.
+- [ ] **TF** 카메라(`camera_color_optical_frame`)→`base_link` 연결 — MoveIt 목표 변환에 필수.
+- [ ] `_carry_pose()` 구현(LIFT/CARRY 목표, base_link +Z 리프트) — 현재 None 반환해 LIFT 스킵.
+- [ ] status enum 파워트레인 팀 합의(§6-D) → 파일 상단 상수 교체.
+- [ ] 구간4 제설 주체 결정(D); upstream 머지 시점 결정(브릿지 파일 필요).
 
 ### 검증 (하드웨어 없이 mock)
 
 ```bash
-cd /root/ros2_ws && colcon build --packages-select dynamixel_control robot_arm_msgs
+cd /root/ros2_ws && colcon build --packages-select robot_arm_msgs dynamixel_control
 source install/setup.bash && ros2 run dynamixel_control arm_fsm
-# 다른 터미널
-ros2 topic pub --once /pick_target robot_arm_msgs/DetectedObject '{class_name: box, confidence: 0.9, pose: {position: {z: 0.4}}}'
+# 다른 터미널 — /pick_target은 transient_local이라 durability 맞춰야 전달됨
+ros2 topic pub --qos-durability transient_local /pick_target robot_arm_msgs/DetectedObject \
+  '{class_name: box, confidence: 0.9, pose: {position: {z: 0.4}, orientation: {w: 1.0}}}'
 ros2 topic pub --once /arrival_status robot_arm_msgs/ArrivalStatus '{status: ARRIVED_PICKUP}'
-ros2 topic echo /arm_status   # PERCEIVING→PLANNING→EXECUTING... 전이 확인
+# 기대: IDLE→PERCEIVE→PLAN→DESCEND (move_group 없으면 move_action 미준비 경고 후 대기)
 ```
-
-> ⚠️ `PHASE3_FSM_설계.md`·`arm_fsm_node.py`·setup.py 변경은 **아직 커밋 안 함**.
 
 ---
 
@@ -175,7 +175,7 @@ ros2 run robot_arm_perception perception_node --ros-args \
 - [~] **로봇팔 FSM**: `/arrival_status` 수신 → `/pick_target` 읽기 → 픽 시퀀스 *(스켈레톤 완료, 2026-06-29)*
   - ✅ 신규 노드 `src/dynamixel_control/dynamixel_control/arm_fsm_node.py` (위치: perception 아님 dynamixel_control)
   - ✅ `/arrival_status`(ArrivalStatus) 구독, `status=='ARRIVED_PICKUP'` 시 FSM 전환
-  - 🔧 픽 모션: **MoveIt 대신 position_node 직접 제어**(결정 A) → `_solve_ik()` 실제 구현 + position_node 그리퍼 ID 추가 남음
+  - 🔧 픽 모션: **MoveIt 단일 경로(결정 가)** → 브릿지 effort 발행 + 그리퍼 실행 경로 + TF 연결 남음
 
 - [ ] **자세 락**: `/chassis_mode` 구독
   - `mode == 'CORNERING'` 또는 `'ROUGH_TERRAIN'` → 현재 관절각 유지 명령

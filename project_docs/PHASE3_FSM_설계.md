@@ -98,28 +98,46 @@ DROP 발생 시: 팔이 `/arm_status=FAILED` → 파워트레인이 다시 `ALIG
 
 ---
 
-## 6. 구현 갭 / 선결 과제 (코딩 전 해결 필요)
+## 6. 구현 방식 결정 (가) + 남은 선결 과제
 
-**A. MoveIt 실하드웨어 경로 부재** (가장 큰 갭)
-현재 `robot_arm_moveit_config`는 `mock_components/GenericSystem`으로 **가짜 관절만** 구동. 실제 XL430을 MoveIt으로 움직이려면 **XL430용 `ros2_control` 하드웨어 인터페이스 작성 필요**(아직 없음). `dynamixel_control/position_node`는 토픽 기반이라 MoveIt FollowJointTrajectory와 직접 연결 안 됨.
-→ 선택: (a) ros2_control HW 인터페이스 신규 작성, (b) FSM이 MoveIt 대신 position_node에 직접 goal 전송(IK는 별도 호출). 결정 필요.
+### 결정: '가' — MoveIt 단일 경로 (2026-06-29)
 
-**B. 그리퍼 전류 피드백 경로**
-파지/DROP 판정의 핵심인 "전류 ≥ 임계"·"전류 급감"은 그리퍼 모터 current가 필요. 현재 `position_node`는 `DXL_IDS=[0..4]`(팔 5축) current를 `/dynamixel/state`로 읽지만, **그리퍼 핑거가 Dynamixel인지·어느 ID인지 불명확**(URDF는 prismatic finger, pick_test_pkg는 gripper_controller 사용). → 그리퍼 하드웨어·ID·전류 임계값 확정 필요.
+> ⚠️ 처음엔 "MoveIt 실하드웨어 경로 부재 → position_node 직접 제어(A)"로 갔으나,
+> **upstream/main에 이미 `moveit_dynamixel_bridge`(PR #9, commit 08ac318)가 있음**을
+> PR 점검 중 발견. 이 브릿지가 `/arm_controller/follow_joint_trajectory` 액션을 구현해
+> **MoveIt → 실제 다이나믹셀** 경로를 이미 뚫어놓음 → 전제가 바뀌어 **가로 전환**.
 
-**C. status enum 합의** (파워트레인 팀)
-§3 제안값을 그대로 쓸지. 특히 `ARRIVED_PICKUP`/`ARRIVED_DROP`/`FAILED` 트리거 타이밍. drawio엔 팔↔파워트레인 핸드셰이크가 암묵적이라 명시 합의 필요.
+- **A. 모션 경로**: MoveIt 단일. FSM은 `move_action`(MoveGroup)에 목표 pose만 던지고
+  IK·경로계획은 MoveIt이 수행 → `arm_controller` → `moveit_dynamixel_bridge` → 서보.
+  IK 직접 구현(`_solve_ik`) 숙제 제거됨. position_node 직접 제어는 폐기(포트 경합 회피).
 
-**D. 구간4 제설 작업 주체** — 팔로 치울지/밟고 갈지 미정. 팔이면 두 번째 파지류 동작 추가 설계 필요.
+### 남은 선결 과제 (대부분 **브릿지 측** 작업으로 이관)
 
-**E. 박스 파지 포인트 IK** — 95mm 큐브 상단 파지, 454~754g 하중. 그리퍼 stroke가 95mm 박스를 잡는지 URDF 핑거 범위로 확인 필요.
+**B. 브릿지 effort(전류) 발행** ⚠️ 가장 시급
+파지/DROP 판정은 그리퍼 current가 필요한데, 현재 `moveit_dynamixel_bridge`는
+`/joint_states`에 **position만** 발행. → 브릿지가 GroupSyncRead로 PRESENT_CURRENT를 읽어
+`/joint_states.effort`에 채우도록 확장해야 함. (FSM은 effort에서 읽도록 이미 구현)
+
+**C. 그리퍼 실행 경로** — 그리퍼도 Dynamixel(결정 B). 브릿지/컨트롤러에 그리퍼 관절 +
+`gripper_controller` FollowJointTrajectory 실행을 추가해야 함. 전류 임계값은 실측 캘리브.
+
+**D. status enum 합의** (파워트레인 팀) — §3 잠정값(`ARRIVED_PICKUP`/`ARRIVED_DROP`/`DONE`...)
+확정. drawio엔 핸드셰이크가 암묵적이라 명시 합의 필요.
+
+**E. TF 연결** — `/pick_target` pose는 카메라 frame(`camera_color_optical_frame`) 기준.
+MoveIt이 목표를 base_link로 변환하려면 카메라→base_link **TF**가 있어야 함.
+
+**F. 구간4 제설 주체** — 팔로 치울지/밟고 갈지 미정(D 보류).
+
+**G. 박스 파지 stroke** — 95mm 큐브, 454~754g. 그리퍼가 95mm를 잡는지 URDF 핑거 범위 확인(E 가능 확정).
 
 ---
 
-## 7. 다음 단계 (이 문서 합의 후)
+## 7. 다음 단계
 
-1. §6-A 결정 (MoveIt HW 인터페이스 vs position_node 직접) — **구현 방식 분기점**
-2. §6-B 그리퍼 하드웨어/전류 확정
-3. §3 status enum 파워트레인 팀 합의
-4. `arm_fsm_node.py` 스켈레톤 작성 (§4 상태표 → transitions, 토픽 I/O만 먼저 mock으로)
-5. 구간2 단독 통합 테스트 (`/arrival_status` mock 발행 → 파지 시퀀스 → `/arm_status=DONE`)
+1. ✅ `arm_fsm_node.py` 스켈레톤(가 방향) — `dynamixel_control`, 빌드+mock 스모크테스트 통과.
+2. **브릿지 확장**(§6-B effort + §6-C 그리퍼) — 가가 실제로 돌려면 최우선. upstream 머지 선행.
+3. **TF**(§6-E) 카메라→base_link 연결 확인 (`ros2 run tf2_tools view_frames`).
+4. `_carry_pose()` 구현(LIFT/CARRY 목표, base_link +Z 리프트) + 전류 임계 캘리브.
+5. status enum 합의(§6-D) 후 `arm_fsm_node.py` 상단 상수 교체.
+6. 구간2 단독 통합 테스트 (MoveIt+브릿지 기동 → `/arrival_status` mock → 파지 → `/arm_status=DONE`).
