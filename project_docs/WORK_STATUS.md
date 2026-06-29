@@ -123,10 +123,12 @@ airplane(화이트리스트 제외)·person 0.46(min_conf 미달) 정상 탈락.
 
 ### Phase 3 선결 과제 / TODO (대부분 **브릿지 측**으로 이관)
 
-- [ ] **브릿지 effort(전류) 발행** — `moveit_dynamixel_bridge`가 현재 position만 발행 → PRESENT_CURRENT를 `/joint_states.effort`에 채워야 파지/DROP 판정 가능. **최우선.**
-- [ ] **브릿지/컨트롤러에 그리퍼 실행 경로 추가** + 전류 임계값(`grasp_effort_thresh`/`drop_effort_thresh`) 실측 캘리브.
-- [ ] **TF** 카메라(`camera_color_optical_frame`)→`base_link` 연결 — MoveIt 목표 변환에 필수.
-- [ ] `_carry_pose()` 구현(LIFT/CARRY 목표, base_link +Z 리프트) — 현재 None 반환해 LIFT 스킵.
+- [x] **브릿지 effort(전류) 발행** *(2026-06-29 완료)* — `moveit_dynamixel_bridge`가 PRESENT_CURRENT(126,2 signed)~PRESENT_POSITION(132,4)을 연속 10바이트 SyncRead 블록으로 한 번에 읽어 `/joint_states`에 position+effort(**raw signed current**) 동시 발행. FSM이 effort로 파지/DROP 판정.
+- [x] **브릿지에 그리퍼 실행 경로 추가** *(2026-06-29 완료)* — 같은 브릿지 노드에 `/gripper_controller/follow_joint_trajectory` 액션 서버 추가(단일 서보 양 핑거 미러링). 그리퍼 ID·미터↔틱 매핑·열림/닫힘 전부 파라미터화(`gripper_ids` 기본 [5], `gripper_open/close_tick` placeholder).
+  - [ ] **남은 캘리브**: `gripper_open_tick`/`gripper_close_tick` 실측, 전류 임계값(`grasp_effort_thresh`=80·`drop_effort_thresh`=20 raw placeholder) 실측, `gripper_ids` 실제 ID 확정.
+- [x] **TF** 카메라(`camera_color_optical_frame`)→`base_link` 연결 *(2026-06-29 완료)* — `robot_arm_description/launch/camera_tf.launch.py` 추가. 뎁스 카메라(베이스 고정) static TF 2단: `base_link→camera_link`(장착 오프셋, launch arg `cam_x/y/z·cam_roll/pitch/yaw`, placeholder=0) + `camera_link→camera_color_optical_frame`(REP-103 optical 회전 고정). tf2_echo로 체인·회전 검증 완료.
+  - [ ] **남은 캘리브**: 장착 오프셋 실측값을 launch arg로 지정. **RGB 카메라(eye-in-hand)는 URDF 관절 통합 후속 과제.**
+- [x] `_carry_pose()` 구현 *(2026-06-29 완료)* — TF(`base_frame`←`tip_link`)로 현재 TCP 자세 조회 → z+`lift_height`(기본 0.10m), orientation 유지. base_link(planning frame) 기준이라 MoveIt 바로 계획. TF 미가용 시 None→LIFT 스킵(graceful). 파라미터 `base_frame`/`lift_height` 추가, `tf2_ros` 의존 추가. 가짜 TF 스모크테스트 통과.
 - [ ] status enum 파워트레인 팀 합의(§6-D) → 파일 상단 상수 교체.
 - [ ] 구간4 제설 주체 결정(D); upstream 머지 시점 결정(브릿지 파일 필요).
 

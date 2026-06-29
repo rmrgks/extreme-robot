@@ -113,19 +113,24 @@ DROP 발생 시: 팔이 `/arm_status=FAILED` → 파워트레인이 다시 `ALIG
 
 ### 남은 선결 과제 (대부분 **브릿지 측** 작업으로 이관)
 
-**B. 브릿지 effort(전류) 발행** ⚠️ 가장 시급
-파지/DROP 판정은 그리퍼 current가 필요한데, 현재 `moveit_dynamixel_bridge`는
-`/joint_states`에 **position만** 발행. → 브릿지가 GroupSyncRead로 PRESENT_CURRENT를 읽어
-`/joint_states.effort`에 채우도록 확장해야 함. (FSM은 effort에서 읽도록 이미 구현)
+**B. 브릿지 effort(전류) 발행** ✅ 완료 (2026-06-29)
+브릿지가 PRESENT_CURRENT(126,2 signed)~PRESENT_POSITION(132,4)을 연속 10바이트
+SyncRead 블록으로 한 번에 읽어 `/joint_states`에 position+effort(**raw signed current**)
+동시 발행. FSM은 effort에서 읽도록 이미 구현. (임계값 실측 캘리브만 남음)
 
-**C. 그리퍼 실행 경로** — 그리퍼도 Dynamixel(결정 B). 브릿지/컨트롤러에 그리퍼 관절 +
-`gripper_controller` FollowJointTrajectory 실행을 추가해야 함. 전류 임계값은 실측 캘리브.
+**C. 그리퍼 실행 경로** ✅ 완료 (2026-06-29) — 같은 브릿지 노드에
+`/gripper_controller/follow_joint_trajectory` 액션 서버 추가(단일 서보 양 핑거 미러링,
+결정 B). 그리퍼 ID·미터↔틱 매핑·열림/닫힘 전부 파라미터화(`gripper_ids` 기본 [5]).
+남은 것: `gripper_open/close_tick`·전류 임계값 실측 캘리브, `gripper_ids` 실제 ID 확정.
 
 **D. status enum 합의** (파워트레인 팀) — §3 잠정값(`ARRIVED_PICKUP`/`ARRIVED_DROP`/`DONE`...)
 확정. drawio엔 핸드셰이크가 암묵적이라 명시 합의 필요.
 
-**E. TF 연결** — `/pick_target` pose는 카메라 frame(`camera_color_optical_frame`) 기준.
-MoveIt이 목표를 base_link로 변환하려면 카메라→base_link **TF**가 있어야 함.
+**E. TF 연결** ✅ 완료 (2026-06-29) — `robot_arm_description/launch/camera_tf.launch.py`.
+perception 이 pyrealsense2 직접 사용(드라이버 미사용)이라 아무도 TF 를 안 냄 → 뎁스 카메라
+(베이스 고정) static TF 2단 발행: `base_link→camera_link`(장착 오프셋 launch arg, placeholder=0)
++ `camera_link→camera_color_optical_frame`(REP-103 optical 회전 고정). tf2_echo 검증 완료.
+남은 것: 장착 오프셋 실측. **2번 RGB 카메라(eye-in-hand)는 URDF 관절 통합 후속 과제.**
 
 **F. 구간4 제설 주체** — 팔로 치울지/밟고 갈지 미정(D 보류).
 
@@ -136,8 +141,8 @@ MoveIt이 목표를 base_link로 변환하려면 카메라→base_link **TF**가
 ## 7. 다음 단계
 
 1. ✅ `arm_fsm_node.py` 스켈레톤(가 방향) — `dynamixel_control`, 빌드+mock 스모크테스트 통과.
-2. **브릿지 확장**(§6-B effort + §6-C 그리퍼) — 가가 실제로 돌려면 최우선. upstream 머지 선행.
-3. **TF**(§6-E) 카메라→base_link 연결 확인 (`ros2 run tf2_tools view_frames`).
-4. `_carry_pose()` 구현(LIFT/CARRY 목표, base_link +Z 리프트) + 전류 임계 캘리브.
-5. status enum 합의(§6-D) 후 `arm_fsm_node.py` 상단 상수 교체.
-6. 구간2 단독 통합 테스트 (MoveIt+브릿지 기동 → `/arrival_status` mock → 파지 → `/arm_status=DONE`).
+2. ✅ **브릿지 확장**(§6-B effort + §6-C 그리퍼) — 완료(2026-06-29). 전류 임계 실측 캘리브만 남음.
+3. ✅ **TF**(§6-E) 카메라→base_link — `camera_tf.launch.py` 완료(2026-06-29). 장착 오프셋 실측만 남음.
+4. ✅ `_carry_pose()` 구현 — 완료(2026-06-29). TF로 현재 TCP +Z(`lift_height`) 리프트.
+5. status enum 합의(§6-D) 후 `arm_fsm_node.py` 상단 상수 교체. **(미완)**
+6. 구간2 단독 통합 테스트 (MoveIt+브릿지+`camera_tf`+perception 기동 → `/arrival_status` mock → 파지 → `/arm_status=DONE`). **(다음 단계)**

@@ -28,6 +28,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener, TransformException
 
 from builtin_interfaces.msg import Duration
 from sensor_msgs.msg import JointState
@@ -85,6 +87,8 @@ class ArmFsmNode(Node):
         # MoveIt
         self.declare_parameter('planning_group', 'arm')          # SRDF group
         self.declare_parameter('tip_link', 'link_6')             # 그리퍼 부모 링크
+        self.declare_parameter('base_frame', 'base_link')        # planning frame (리프트 기준)
+        self.declare_parameter('lift_height', 0.10)              # LIFT 시 base_link +Z [m]
         self.declare_parameter('pick_frame_id', 'camera_color_optical_frame')
         self.declare_parameter('pos_tolerance', 0.01)            # [m]
         self.declare_parameter('orient_tolerance', 0.1)          # [rad]
@@ -95,9 +99,11 @@ class ArmFsmNode(Node):
         self.declare_parameter('gripper_joints', ['left_finger_joint', 'right_finger_joint'])
         self.declare_parameter('gripper_open', 0.02)
         self.declare_parameter('gripper_close', 0.0)
-        # 전류(effort) 임계 — /joint_states effort 단위, 실측 필요(TODO)
-        self.declare_parameter('grasp_effort_thresh', 0.2)
-        self.declare_parameter('drop_effort_thresh', 0.05)
+        # 전류(effort) 임계 — moveit_dynamixel_bridge 가 /joint_states.effort 에
+        # raw signed PRESENT_CURRENT(XL430 기준 1단위≈2.69mA)를 발행. 아래는 placeholder,
+        # 실측 캘리브 필요(TODO): 무부하 파지 전류/낙하 시 전류를 측정해 임계값 설정.
+        self.declare_parameter('grasp_effort_thresh', 80.0)   # ≈215mA, placeholder
+        self.declare_parameter('drop_effort_thresh', 20.0)    # ≈54mA, placeholder
         # 동작 제어
         self.declare_parameter('max_regrasp', 3)
         self.declare_parameter('gripper_action_time', 1.0)       # 그리퍼 동작 시간 [s]
@@ -106,6 +112,8 @@ class ArmFsmNode(Node):
         g = self.get_parameter
         self.planning_group = g('planning_group').value
         self.tip_link = g('tip_link').value
+        self.base_frame = g('base_frame').value
+        self.lift_height = g('lift_height').value
         self.pick_frame_id = g('pick_frame_id').value
         self.pos_tol = g('pos_tolerance').value
         self.orient_tol = g('orient_tolerance').value
@@ -128,6 +136,11 @@ class ArmFsmNode(Node):
         self.create_subscription(JointState, '/joint_states', self._on_joint_states, 10)
 
         self.pub_status = self.create_publisher(ArmStatus, '/arm_status', 10)
+
+        # TF: base_link ← tip_link 조회용 (LIFT 시 현재 TCP 기준 수직 리프트 계산)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         self._move = ActionClient(self, MoveGroup, 'move_action')          # MoveIt
         self._grip = ActionClient(self, FollowJointTrajectory,
                                   '/gripper_controller/follow_joint_trajectory')
@@ -377,8 +390,28 @@ class ArmFsmNode(Node):
         return ps
 
     def _carry_pose(self):
-        # TODO: 파지 pose에서 base_link +Z로 들어올린 운반 자세 (TF 변환 필요).
-        return None
+        """현재 TCP(tip_link)를 base_link 기준 +Z 로 들어올린 운반 자세.
+
+        파지 직후의 실제 말단 자세를 TF(base_frame←tip_link)로 조회 → z 에 lift_height
+        를 더하고 orientation 은 유지(박스 자세 보존). base_frame 이 planning frame 이라
+        MoveIt 이 바로 계획 가능. TF 미가용 시 None → 호출부(_do_lift)가 LIFT 스킵.
+        """
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_link, Time())
+        except TransformException as e:
+            self.get_logger().warn(
+                f'carry_pose TF 조회 실패 ({self.base_frame} <- {self.tip_link}): {e}')
+            return None
+
+        ps = PoseStamped()
+        ps.header.frame_id = self.base_frame
+        ps.header.stamp = self.get_clock().now().to_msg()
+        t = tf.transform.translation
+        ps.pose.position.x = t.x
+        ps.pose.position.y = t.y
+        ps.pose.position.z = t.z + self.lift_height
+        ps.pose.orientation = tf.transform.rotation
+        return ps
 
     # ── 그리퍼 ─────────────────────────────────
 
