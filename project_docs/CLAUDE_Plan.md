@@ -123,6 +123,7 @@ string status   # PERCEIVING, PLANNING, EXECUTING, DONE
 - `/pick_target`: 픽 대상 클래스 선별 → 하나만 publish. **QoS `transient_local`(latched)** 로 줘서 "도착 → 집어" 타이밍에 최신 타깃 안 놓치게
 - 분리 이유: 로봇팔 FSM이 매번 배열 필터링 안 해도 되고 픽 트리거 명확
 - `/chassis_mode`·`/arm_status`는 위 메시지 설계 포인트 참고 (역할 분리 이유 동일하게 적용)
+- **제어-플레인 토픽/액션 (Phase 3 구현, 팀 간 인터페이스 아님 — 로봇팔 내부):** `moveit_dynamixel_bridge`가 `/joint_states`(position+**effort=raw 전류**) publish + `/arm_controller`·`/gripper_controller`의 `follow_joint_trajectory` 액션 서버 제공. `arm_fsm`은 MoveIt `move_action`(MoveGroup)로 팔, `/gripper_controller`로 그리퍼 구동. 카메라 TF는 `camera_tf.launch.py`(static)가 `base_link↔camera_color_optical_frame` 발행.
 
 ---
 
@@ -153,11 +154,14 @@ string status   # PERCEIVING, PLANNING, EXECUTING, DONE
 
 ### Phase 3 — FSM 통합
 
-- [ ] 로봇팔 FSM: 도착 신호 수신 → `/pick_target` 읽기 → MoveIt 픽 시퀀스
-- [ ] 로봇팔 FSM: `/chassis_mode`가 CORNERING/ROUGH_TERRAIN이면 자세 락(현재 관절각 유지), DRIVING 복귀 시 언락
-- [ ] 로봇팔 FSM: 미션 동작(픽/조작) 완료 시 `/arm_status`(status=DONE) publish → 파워트레인 재출발 신호
-- [ ] 파워트레인: `/detected_objects`에서 신호등/정지선/마커만 필터 → 레인 추종 트리거
-- [ ] 상태 토픽 핸드셰이크 (도착 → 픽 완료 → 다음 미션 신호) 흐름 검증
+- [x] 로봇팔 FSM: 도착 신호 수신 → `/pick_target` 읽기 → MoveIt 픽 시퀀스 *(arm_fsm_node.py, 12상태, MoveIt 단일 경로 '가'. 빌드+mock 전이 검증. 실서보 연동만 남음)*
+- [x] 로봇팔 FSM: `/chassis_mode`가 CORNERING/ROUGH_TERRAIN/FOLLOW_LEAD이면 자세 락(`LOCKED`: 진행 모션 취소+홀드), DRIVING 복귀 시 직전 상태로 언락 *(스켈레톤 구현, 복구 정밀화 TODO)*
+- [x] 로봇팔 FSM: 픽 완료 시 `/arm_status`(status=DONE) publish *(구현. status enum은 파워트레인 합의 후 확정)*
+- [x] **실하드웨어 경로 (브릿지)**: `moveit_dynamixel_bridge`가 `/arm_controller`·`/gripper_controller` 액션 + `/joint_states`(position+effort) 제공 → MoveIt/FSM 실서보 구동 경로 완성. effort로 파지/DROP 판정.
+- [x] **TF**: `camera_tf.launch.py`로 `camera_color_optical_frame→base_link` 연결 (MoveIt 목표 변환).
+- [ ] 파워트레인: `/detected_objects`에서 신호등/정지선/마커만 필터 → 레인 추종 트리거 *(파워트레인 팀 작업)*
+- [ ] 상태 토픽 핸드셰이크 (도착 → 픽 완료 → 다음 미션 신호) 흐름 검증 *(실하드웨어 통합 테스트에서 — HW 인수인계 문서 참고)*
+- [ ] **실측 캘리브** (HW 연결 후): 전류 임계(`grasp/drop_effort_thresh`), 그리퍼 틱(`gripper_open/close_tick`), `gripper_ids`, 카메라 오프셋(`cam_*`).
 
 ### Phase 4 — 네트워크 + 통합 테스트
 
@@ -186,12 +190,12 @@ string status   # PERCEIVING, PLANNING, EXECUTING, DONE
 ## 5. 오픈 이슈 (미팅에서 확정)
 
 - [ ] 노션 기존 토픽 스펙 존재 여부 → Claude Code로 워크스페이스/리포 스캔
-- [ ] optical frame 실제 이름 (URDF vs 브릿지 코드 파라미터 대조)
+- [ ] optical frame 실제 이름 (URDF vs 브릿지 코드 파라미터 대조) — *현재 `camera_tf.launch.py`·perception·FSM 모두 `camera_color_optical_frame` placeholder 사용. 실 RealSense frame 이름은 HW 연결 후 `tf2_tools view_frames`로 확정.*
 - [ ] status 문자열 enum 네이밍 합의
 - [ ] 멀티캐스트 가능 여부 (와이파이 환경)
 - [ ] `/chassis_mode`(MISSION_STOP) → `/arrival_status`(mission_id+status) 트리거 순서/타이밍 확정 — 제안한 "모드로 깨우고 상태로 구체 작업" 흐름에 파워트레인도 동의하는지
 - [ ] 라이다·Depth 센서 공유 방식 확인 (동일 물리 센서 vs 마운트 위치 다른 별도 센서) → `base_link`/`arm_base_link`/camera optical frame TF 관계 결정
-- [ ] 자세 락 구현 방식 합의 (현재 각도 유지 명령 vs 별도 안전 자세로 이동)
+- [ ] 자세 락 구현 방식 합의 (현재 각도 유지 명령 vs 별도 안전 자세로 이동) — *FSM은 현재 `LOCKED`에서 "진행 모션 취소 + 현재 각도 홀드"(브릿지 torque 유지)로 구현. 별도 안전 자세 이동으로 바꿀지 합의 필요.*
 - [ ] 파워트레인 Orin Nano(카메라·연산)를 로봇팔 Jetson 단일 보드로 합치는 마이그레이션 범위 확정 (카메라 마운트 위치 1개로 통일, `powertrain_jetson` 컨테이너 정리/제거 시점)
 
 ---

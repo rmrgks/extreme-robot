@@ -1,7 +1,7 @@
 # 작업 인수인계 지시서
 
 > **대상**: 다음 Claude Code 세션  
-> **최종 업데이트**: 2026-06-29 (Phase 3 착수 — 설계 문서 + 팔 FSM 스켈레톤)  
+> **최종 업데이트**: 2026-06-29 (Phase 3 실하드웨어 경로 완성 — 브릿지 effort·그리퍼, _carry_pose, camera_tf TF. 하드웨어 없이 가능한 범위 검증 완료)  
 > **기준 문서**: `/home/jo/ros2_ws/CLAUDE.md` (전체 통합 계획)  
 > **레포 경로**: `/home/jo/ros2_ws/extreme-robot/`  
 > **ROS2 소스**: `extreme-robot/ros2_ws/src/`
@@ -16,7 +16,8 @@
 |--------|------|------|
 | `robot_arm_msgs` | `src/robot_arm_msgs/` | ✅ 빌드 완료 |
 | `robot_arm_perception` | `src/robot_arm_perception/` | ✅ 빌드 완료 |
-| `dynamixel_control` | `src/dynamixel_control/` | ✅ 기존 + 스켈레톤 추가 |
+| `dynamixel_control` | `src/dynamixel_control/` | ✅ `arm_fsm`(FSM+carry_pose) + `moveit_dynamixel_bridge`(effort+그리퍼 확장) |
+| `robot_arm_description` | `src/robot_arm_description/` | ✅ `launch/camera_tf.launch.py` 추가(카메라→base_link static TF) |
 
 ### robot_arm_msgs — 메시지 5개 정의 완료
 
