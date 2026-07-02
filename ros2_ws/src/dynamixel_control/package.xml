@@ -12,6 +12,14 @@
   <depend>sensor_msgs</depend>
   <depend>dynamixel_sdk</depend>
   <depend>cv_bridge</depend>
+  <depend>robot_arm_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>moveit_msgs</depend>
+  <depend>control_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>shape_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>tf2_ros</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

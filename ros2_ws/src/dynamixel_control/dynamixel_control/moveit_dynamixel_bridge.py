@@ -13,10 +13,18 @@ from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite, GroupSyncR
 
 ADDR_TORQUE_ENABLE = 64
 ADDR_GOAL_POSITION = 116
+ADDR_PRESENT_CURRENT = 126
 ADDR_PRESENT_POSITION = 132
 
 LEN_GOAL_POSITION = 4
+LEN_PRESENT_CURRENT = 2
 LEN_PRESENT_POSITION = 4
+
+# PRESENT_CURRENT(126,2) ~ PRESENT_POSITION(132,4) 은 X-시리즈 컨트롤 테이블에서 연속 →
+# 126부터 10바이트를 한 번의 SyncRead 로 받아 current/position 을 함께 추출(버스 트랜잭션 1회).
+# (XL430/XC430/XM 계열 공통. 다른 모델이면 주소 재확인 필요 — CLAUDE.md §8 모터모델 미확정.)
+ADDR_SYNC_READ_START = ADDR_PRESENT_CURRENT
+LEN_SYNC_READ = (ADDR_PRESENT_POSITION + LEN_PRESENT_POSITION) - ADDR_PRESENT_CURRENT  # = 10
 
 TORQUE_ENABLE = 1
 TORQUE_DISABLE = 0
@@ -32,6 +40,7 @@ DXL_CENTER_POSITION = 2048
 TICKS_PER_RAD = 4096.0 / (2.0 * math.pi)
 
 
+# 팔 관절 ↔ 다이나믹셀 ID 매핑. (현재 3개만 — 팔 DOF 확정 시 joint_4~ 추가, CLAUDE.md §8)
 JOINT_CONFIG = {
     "joint_1": {"id": 0, "center": 2048, "direction": 1},
     "joint_2": {"id": 1, "center": 2048, "direction": 1},
@@ -39,9 +48,32 @@ JOINT_CONFIG = {
 }
 
 
+def to_signed(value, byte_len):
+    """무부호 정수를 byte_len 바이트 2의 보수 부호 정수로 변환 (PRESENT_CURRENT 용)."""
+    bits = byte_len * 8
+    if value >= (1 << (bits - 1)):
+        value -= (1 << bits)
+    return value
+
+
 class MoveItDynamixelBridge(Node):
     def __init__(self):
         super().__init__("moveit_dynamixel_bridge")
+
+        # --- 그리퍼 파라미터 (단일 서보 양 핑거 미러링; 실하드웨어 확정 후 런치/CLI로 조정) ---
+        self.declare_parameter("gripper_joints", ["left_finger_joint", "right_finger_joint"])
+        self.declare_parameter("gripper_ids", [5])          # 미정 → 기본 1개. 빈 배열이면 그리퍼 비활성
+        self.declare_parameter("gripper_open_m", 0.02)      # prismatic 핑거 열림 [m]
+        self.declare_parameter("gripper_close_m", 0.0)      # 닫힘 [m]
+        self.declare_parameter("gripper_open_tick", 2400)   # placeholder — 실측 캘리브 필요
+        self.declare_parameter("gripper_close_tick", 2048)  # placeholder — 실측 캘리브 필요
+
+        self.gripper_joints = list(self.get_parameter("gripper_joints").value)
+        self.gripper_ids = list(self.get_parameter("gripper_ids").value)
+        self.gripper_open_m = float(self.get_parameter("gripper_open_m").value)
+        self.gripper_close_m = float(self.get_parameter("gripper_close_m").value)
+        self.gripper_open_tick = int(self.get_parameter("gripper_open_tick").value)
+        self.gripper_close_tick = int(self.get_parameter("gripper_close_tick").value)
 
         self.port_handler = PortHandler(DEVICENAME)
         self.packet_handler = PacketHandler(PROTOCOL_VERSION)
@@ -59,32 +91,23 @@ class MoveItDynamixelBridge(Node):
             LEN_GOAL_POSITION,
         )
 
+        # current+position 연속 블록을 한 번에 읽는 SyncRead
         self.group_sync_read = GroupSyncRead(
             self.port_handler,
             self.packet_handler,
-            ADDR_PRESENT_POSITION,
-            LEN_PRESENT_POSITION,
+            ADDR_SYNC_READ_START,
+            LEN_SYNC_READ,
         )
 
+        # 팔 서보: 토크 ON + SyncRead 등록
         for joint_name, config in JOINT_CONFIG.items():
-            dxl_id = config["id"]
+            self._enable_torque(config["id"], joint_name)
+            self.group_sync_read.addParam(config["id"])
 
-            result, error = self.packet_handler.write1ByteTxRx(
-                self.port_handler,
-                dxl_id,
-                ADDR_TORQUE_ENABLE,
-                TORQUE_ENABLE,
-            )
-
-            if result != 0 or error != 0:
-                self.get_logger().warn(
-                    f"Torque enable failed: {joint_name}, id={dxl_id}, "
-                    f"result={result}, error={error}"
-                )
-            else:
-                self.get_logger().info(f"Torque enabled: {joint_name} -> id {dxl_id}")
-
-            self.group_sync_read.addParam(dxl_id)
+        # 그리퍼 서보: 토크 ON + SyncRead 등록
+        for gid in self.gripper_ids:
+            self._enable_torque(gid, f"gripper(id {gid})")
+            self.group_sync_read.addParam(gid)
 
         self.trajectory_sub = self.create_subscription(
             JointTrajectory,
@@ -101,6 +124,17 @@ class MoveItDynamixelBridge(Node):
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback,
         )
+
+        # 그리퍼 액션 서버 (FSM 이 /gripper_controller/follow_joint_trajectory 로 파지/개방 명령)
+        self.gripper_action_server = ActionServer(
+            self,
+            FollowJointTrajectory,
+            "/gripper_controller/follow_joint_trajectory",
+            execute_callback=self.execute_gripper,
+            goal_callback=self.goal_callback,
+            cancel_callback=self.cancel_callback,
+        )
+
         self.joint_state_pub = self.create_publisher(
             JointState,
             "/joint_states",
@@ -109,7 +143,22 @@ class MoveItDynamixelBridge(Node):
 
         self.feedback_timer = self.create_timer(0.05, self.publish_joint_states)
 
-        self.get_logger().info("MoveIt Dynamixel bridge started")
+        self.get_logger().info(
+            f"MoveIt Dynamixel bridge started (arm={list(JOINT_CONFIG)}, "
+            f"gripper_ids={self.gripper_ids})"
+        )
+
+    # ------------------------------------------------------------------ helpers
+    def _enable_torque(self, dxl_id, label):
+        result, error = self.packet_handler.write1ByteTxRx(
+            self.port_handler, dxl_id, ADDR_TORQUE_ENABLE, TORQUE_ENABLE
+        )
+        if result != 0 or error != 0:
+            self.get_logger().warn(
+                f"Torque enable failed: {label}, id={dxl_id}, result={result}, error={error}"
+            )
+        else:
+            self.get_logger().info(f"Torque enabled: {label} -> id {dxl_id}")
 
     def rad_to_tick(self, joint_name, rad):
         config = JOINT_CONFIG[joint_name]
@@ -120,6 +169,20 @@ class MoveItDynamixelBridge(Node):
     def tick_to_rad(self, joint_name, tick):
         config = JOINT_CONFIG[joint_name]
         return (tick - config["center"]) / (config["direction"] * TICKS_PER_RAD)
+
+    def gripper_m_to_tick(self, meters):
+        span = self.gripper_open_tick - self.gripper_close_tick
+        denom = self.gripper_open_m - self.gripper_close_m
+        frac = 0.0 if denom == 0.0 else (meters - self.gripper_close_m) / denom
+        tick = int(round(self.gripper_close_tick + frac * span))
+        return max(DXL_MINIMUM_POSITION_VALUE, min(DXL_MAXIMUM_POSITION_VALUE, tick))
+
+    def gripper_tick_to_m(self, tick):
+        span = self.gripper_open_tick - self.gripper_close_tick
+        if span == 0:
+            return self.gripper_close_m
+        frac = (tick - self.gripper_close_tick) / span
+        return self.gripper_close_m + frac * (self.gripper_open_m - self.gripper_close_m)
 
     def int_to_little_endian_4bytes(self, value):
         return [
@@ -137,6 +200,7 @@ class MoveItDynamixelBridge(Node):
         self.get_logger().info("Cancel requested")
         return CancelResponse.ACCEPT
 
+    # ------------------------------------------------------------------ arm
     def execute_follow_joint_trajectory(self, goal_handle):
         trajectory = goal_handle.request.trajectory
 
@@ -188,6 +252,52 @@ class MoveItDynamixelBridge(Node):
 
         self.group_sync_write.clearParam()
 
+    # ------------------------------------------------------------------ gripper
+    def execute_gripper(self, goal_handle):
+        trajectory = goal_handle.request.trajectory
+
+        result = FollowJointTrajectory.Result()
+
+        if not self.gripper_ids:
+            self.get_logger().warn("Gripper goal received but gripper_ids is empty — ignored")
+            goal_handle.succeed()
+            result.error_code = FollowJointTrajectory.Result.SUCCESSFUL
+            return result
+
+        if trajectory.points:
+            point = trajectory.points[-1]
+            name_to_pos = dict(zip(trajectory.joint_names, point.positions))
+            # 단일 서보 미러링: 대표 핑거 관절 위치 하나만 사용
+            target_m = None
+            for jn in self.gripper_joints:
+                if jn in name_to_pos:
+                    target_m = name_to_pos[jn]
+                    break
+            if target_m is not None:
+                self._write_gripper(target_m)
+            else:
+                self.get_logger().warn(
+                    f"Gripper goal has no known finger joint {self.gripper_joints}"
+                )
+
+        goal_handle.succeed()
+        result.error_code = FollowJointTrajectory.Result.SUCCESSFUL
+        result.error_string = "Gripper command sent to Dynamixel"
+        return result
+
+    def _write_gripper(self, meters):
+        goal_tick = self.gripper_m_to_tick(meters)
+        for gid in self.gripper_ids:
+            result, error = self.packet_handler.write4ByteTxRx(
+                self.port_handler, gid, ADDR_GOAL_POSITION, goal_tick
+            )
+            if result != 0 or error != 0:
+                self.get_logger().warn(
+                    f"Gripper write failed: id={gid}, result={result}, error={error}"
+                )
+        self.get_logger().info(f"gripper -> {meters:.4f} m -> tick {goal_tick} (ids {self.gripper_ids})")
+
+    # ------------------------------------------------------------------ feedback
     def publish_joint_states(self):
         result = self.group_sync_read.txRxPacket()
         if result != 0:
@@ -196,36 +306,52 @@ class MoveItDynamixelBridge(Node):
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
 
+        # 팔 관절: position(rad) + effort(raw current, signed)
         for joint_name, config in JOINT_CONFIG.items():
             dxl_id = config["id"]
-
-            available = self.group_sync_read.isAvailable(
-                dxl_id,
-                ADDR_PRESENT_POSITION,
-                LEN_PRESENT_POSITION,
-            )
-            if not available:
+            sample = self._read_sample(dxl_id)
+            if sample is None:
                 continue
-
-            tick = self.group_sync_read.getData(
-                dxl_id,
-                ADDR_PRESENT_POSITION,
-                LEN_PRESENT_POSITION,
-            )
-
+            current_raw, tick = sample
             msg.name.append(joint_name)
             msg.position.append(self.tick_to_rad(joint_name, tick))
+            msg.effort.append(float(current_raw))
+
+        # 그리퍼 핑거 관절: 단일 서보(gripper_ids[0]) 값을 양 핑거에 동일 보고.
+        # position(m) + effort(raw current) — FSM 이 effort 로 파지/DROP 판정.
+        if self.gripper_ids:
+            sample = self._read_sample(self.gripper_ids[0])
+            if sample is not None:
+                current_raw, tick = sample
+                finger_m = self.gripper_tick_to_m(tick)
+                for jn in self.gripper_joints:
+                    msg.name.append(jn)
+                    msg.position.append(finger_m)
+                    msg.effort.append(float(current_raw))
 
         self.joint_state_pub.publish(msg)
 
+    def _read_sample(self, dxl_id):
+        """SyncRead 블록에서 (signed current, position tick) 추출. 미수신 시 None."""
+        if not self.group_sync_read.isAvailable(dxl_id, ADDR_PRESENT_CURRENT, LEN_PRESENT_CURRENT):
+            return None
+        if not self.group_sync_read.isAvailable(dxl_id, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION):
+            return None
+        current_raw = to_signed(
+            self.group_sync_read.getData(dxl_id, ADDR_PRESENT_CURRENT, LEN_PRESENT_CURRENT),
+            LEN_PRESENT_CURRENT,
+        )
+        tick = self.group_sync_read.getData(dxl_id, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION)
+        return current_raw, tick
+
     def destroy_node(self):
         for config in JOINT_CONFIG.values():
-            dxl_id = config["id"]
             self.packet_handler.write1ByteTxRx(
-                self.port_handler,
-                dxl_id,
-                ADDR_TORQUE_ENABLE,
-                TORQUE_DISABLE,
+                self.port_handler, config["id"], ADDR_TORQUE_ENABLE, TORQUE_DISABLE
+            )
+        for gid in self.gripper_ids:
+            self.packet_handler.write1ByteTxRx(
+                self.port_handler, gid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE
             )
 
         self.port_handler.closePort()

@@ -29,6 +29,7 @@ setup(
             'moveit_dynamixel_bridge = dynamixel_control.moveit_dynamixel_bridge:main',
             'yolo_bridge = dynamixel_control.yolo_to_dynamixel_bridge:main',
             'yolo_detection = dynamixel_control.yolo_detection_node:main',
+            'arm_fsm = dynamixel_control.arm_fsm_node:main',
         ],
     },
 )
