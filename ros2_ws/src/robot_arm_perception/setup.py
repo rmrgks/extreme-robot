@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'perception_node = robot_arm_perception.perception_node:main',
+            'stream_node = robot_arm_perception.stream_node:main',
         ],
     },
 )

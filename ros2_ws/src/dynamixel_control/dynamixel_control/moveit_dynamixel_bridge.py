@@ -99,15 +99,15 @@ class MoveItDynamixelBridge(Node):
             LEN_SYNC_READ,
         )
 
-        # 팔 서보: 토크 ON + SyncRead 등록
+        # 팔 서보: 토크 ON 성공한 ID만 SyncRead 등록
         for joint_name, config in JOINT_CONFIG.items():
-            self._enable_torque(config["id"], joint_name)
-            self.group_sync_read.addParam(config["id"])
+            if self._enable_torque(config["id"], joint_name):
+                self.group_sync_read.addParam(config["id"])
 
-        # 그리퍼 서보: 토크 ON + SyncRead 등록
+        # 그리퍼 서보: 토크 ON 성공한 ID만 SyncRead 등록
         for gid in self.gripper_ids:
-            self._enable_torque(gid, f"gripper(id {gid})")
-            self.group_sync_read.addParam(gid)
+            if self._enable_torque(gid, f"gripper(id {gid})"):
+                self.group_sync_read.addParam(gid)
 
         self.trajectory_sub = self.create_subscription(
             JointTrajectory,
@@ -157,8 +157,10 @@ class MoveItDynamixelBridge(Node):
             self.get_logger().warn(
                 f"Torque enable failed: {label}, id={dxl_id}, result={result}, error={error}"
             )
+            return False
         else:
             self.get_logger().info(f"Torque enabled: {label} -> id {dxl_id}")
+            return True
 
     def rad_to_tick(self, joint_name, rad):
         config = JOINT_CONFIG[joint_name]
@@ -299,9 +301,8 @@ class MoveItDynamixelBridge(Node):
 
     # ------------------------------------------------------------------ feedback
     def publish_joint_states(self):
-        result = self.group_sync_read.txRxPacket()
-        if result != 0:
-            return
+        self.group_sync_read.txRxPacket()
+        # 일부 ID가 버스에 없어도 응답받은 ID만 처리 (result 무시)
 
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()

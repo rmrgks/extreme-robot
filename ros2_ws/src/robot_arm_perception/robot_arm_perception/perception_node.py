@@ -30,7 +30,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from geometry_msgs.msg import Pose, Point, Quaternion
-from sensor_msgs.msg import RegionOfInterest
+from sensor_msgs.msg import RegionOfInterest, Image as ImageMsg
+from cv_bridge import CvBridge
 from robot_arm_msgs.msg import DetectedObject, DetectedObjectArray
 
 
@@ -190,6 +191,8 @@ class PerceptionNode(Node):
         latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_pick = self.create_publisher(
             DetectedObject, '/pick_target', latched_qos)
+        self.pub_debug = self.create_publisher(ImageMsg, '/perception/debug_image', 1)
+        self._bridge = CvBridge()
 
         # 추론 루프 스레드
         self._running = True
@@ -302,6 +305,12 @@ class PerceptionNode(Node):
             if pick is not None:
                 self.pub_pick.publish(pick)
 
+            # ④ debug 이미지 발행
+            if self.pub_debug.get_subscription_count() > 0:
+                debug_img = self._draw_debug(color_img.copy(), array_msg.objects, masks, pick)
+                self.pub_debug.publish(
+                    self._bridge.cv2_to_imgmsg(debug_img, encoding='bgr8'))
+
             if idx % 30 == 0:
                 if array_msg.objects:
                     summary = ', '.join(
@@ -384,6 +393,35 @@ class PerceptionNode(Node):
             self._rs, depth_frame, depth_img, cu, cv_, r, self._depth_cal)
         if xyz is not None:
             obj.pose.position = Point(x=float(xyz[0]), y=float(xyz[1]), z=float(xyz[2]))
+
+    def _draw_debug(self, img, objects, masks, pick):
+        """감지 결과를 img에 그려 반환. pick 타겟은 초록, 나머지는 파란색."""
+        overlay = img.copy()
+        for i, obj in enumerate(objects):
+            is_pick = (pick is not None and obj is pick)
+            color = (0, 255, 0) if is_pick else (255, 100, 0)
+
+            # 마스크 반투명 오버레이
+            binmask = self._get_binmask(masks, i)
+            if binmask is not None:
+                overlay[binmask] = (
+                    overlay[binmask] * 0.5 + np.array(color, dtype=np.float32) * 0.5
+                ).astype(np.uint8)
+
+            # 바운딩박스
+            x1 = obj.bbox.x_offset
+            y1 = obj.bbox.y_offset
+            x2 = x1 + obj.bbox.width
+            y2 = y1 + obj.bbox.height
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
+
+            # 텍스트: 클래스명 + confidence + 거리
+            z = obj.pose.position.z
+            depth_str = f' {z:.2f}m' if z != 0.0 else ''
+            label = f'{obj.class_name} {obj.confidence:.2f}{depth_str}'
+            cv2.putText(overlay, label, (x1, max(y1 - 6, 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+        return overlay
 
     def _grab_frame(self):
         """(color_img, depth_frame, depth_img) 반환. test 모드는 depth None."""
