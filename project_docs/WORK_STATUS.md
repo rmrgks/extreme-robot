@@ -1,10 +1,29 @@
 # 작업 인수인계 지시서
 
 > **대상**: 다음 Claude Code 세션  
-> **최종 업데이트**: 2026-06-29 (Phase 3 실하드웨어 경로 완성 — 브릿지 effort·그리퍼, _carry_pose, camera_tf TF. 하드웨어 없이 가능한 범위 검증 완료)  
+> **최종 업데이트**: 2026-07-04 (커밋 `3bed8bd` — HW-2~6 실하드웨어 테스트 완료, 손목 카메라 TF·디버그 스트리밍 추가)  
 > **기준 문서**: `/home/jo/ros2_ws/CLAUDE.md` (전체 통합 계획)  
 > **레포 경로**: `/home/jo/ros2_ws/extreme-robot/`  
 > **ROS2 소스**: `extreme-robot/ros2_ws/src/`
+
+---
+
+## HW-2~6 실하드웨어 테스트 완료 (2026-07-04, 커밋 `3bed8bd`)
+
+Phase 3 문서화(아래 섹션들) 이후 실제 젯슨/서보/카메라로 진행한 하드웨어 검증 세션. 변경 6개 파일:
+
+- **`Dockerfile` / `docker-compose.yml`**: 베이스 이미지를 `osrf/ros:humble-desktop-full` → `ros:humble-ros-base` + `ros-humble-desktop`로 분리하고 `linux/arm64` 플랫폼을 명시(젯슨 실기 배포용). `pyrealsense2`(pip) + gstreamer 풀세트(`gstreamer1.0-plugins-{base,good,bad,ugly}`, `-libav`, `libgstreamer*-dev`) 신규 설치 — 아래 `stream_node`용.
+- **`moveit_dynamixel_bridge.py`**: `_enable_torque()`가 `bool` 반환하도록 변경, **토크 활성화에 성공한 ID만** `group_sync_read.addParam()`으로 등록. 이전엔 버스에 없는 서보(전원 미연결 등)가 하나만 있어도 SyncRead 대상 전체가 얽혀 있었는데, 실하드웨어에서 일부 관절 서보가 없거나 응답 없는 상태로도 나머지 서보는 정상 구동되도록 방어. `publish_joint_states()`도 `txRxPacket()` 결과값을 더 이상 체크하지 않고 응답 온 ID만 처리(일부 미응답 허용).
+- **`camera_tf.launch.py`**: 카메라 2대 체계로 확장.
+  - 전방 RGB-D(RealSense D435i, 차체 고정): `cam_x/y/z/roll/pitch/yaw` 기본값을 placeholder(0)에서 **CAD 실측값**으로 교체(`x=0.123, z=0.082, pitch=-0.26`).
+  - **손목 RGB(그리퍼 위, 신규)**: `base_link → wrist_camera_link` static TF 추가, CAD 실측값 기준(`x=0.040, z=0.295`). 현재는 **홈 포즈 기준 static placeholder** — 팔이 움직이면 실제 카메라 위치와 어긋남. URDF 관절 통합은 여전히 후속 과제.
+- **`perception_node.py`**: `/perception/debug_image`(`sensor_msgs/Image`) 퍼블리셔 신규 — 구독자 있을 때만(`get_subscription_count() > 0`) `_draw_debug()`로 마스크 반투명 오버레이 + bbox + `클래스명/conf/거리` 라벨을 그려 발행(pick 타겟=초록, 나머지=파란색).
+- **`stream_node.py`(신규 노드, `robot_arm_perception`)**: `/perception/debug_image` 구독 → `gst-launch-1.0` 서브프로세스(rawvideoparse→x264enc zerolatency→mpegtsmux→**srtsink**)로 H.264/SRT 송신. 파라미터 `port`(기본 5000)/`fps`(15)/`bitrate_kbps`(3000)/`latency_ms`(60). PC 쪽에서 `recv_stream.sh <port> <JetsonIP>`로 수신(파워트레인 레포 스크립트). 프레임 크기 바뀌면 gst 프로세스 재시작, 파이프 끊기면 자동 재시작.
+  - 실행: `ros2 run robot_arm_perception stream_node --ros-args -p host_ip:=<젯슨IP>` (entry point `setup.py` 등록 완료)
+
+**검증 상태**: 커밋 메시지상 "HW-2~6 실하드웨어 테스트 완료"이나, 이 문서의 나머지 섹션(그리퍼 tick/전류 임계값 실측, 카메라 마운트 캘리브 등)이 갱신되지 않았으므로 어디까지 실측 완료됐는지는 다음 세션에서 재확인 필요. 회귀 확인 포인트: SyncRead 필터링 변경 후 정상 서보들의 `/joint_states` 발행 주기·값이 기존과 동일한지.
+
+**진행 중(미커밋)**: 저장소 루트 `ros2_ws/`에 `check_servo.py`/`diag_servo.py`/`fix_servo.py`/`fix_servo2.py`/`move_servo.py` 임시 스크립트 존재 — ID 0 서보의 Operating Mode·Position Limit 이상 및 Hardware Error 복구(토크 OFF→리밋 재설정→리부트→토크 ON) 시도 흔적. 다음 세션에서 원인 파악 후 정리(성공했으면 삭제, 재현되면 `dynamixel_control`에 정식 유틸로 편입 검토).
 
 ---
 
@@ -236,7 +255,8 @@ extreme-robot/ros2_ws/src/
 │       └── ArmStatus.msg
 ├── robot_arm_perception/        ← 신규 (markerless 인식 노드)
 │   └── robot_arm_perception/
-│       └── perception_node.py        ← 핵심 파일 (YOLO seg + depth median + 2D PCA)
+│       ├── perception_node.py        ← 핵심 파일 (YOLO seg + depth median + 2D PCA + debug_image)
+│       └── stream_node.py            ← 신규 (debug_image → H.264/SRT 스트리밍, 2026-07-04)
 ├── dynamixel_control/           ← 기존 (더미 perception_node 스켈레톤은 삭제됨)
 ├── robot_arm_description/       ← 기존 (URDF)
 ├── robot_arm_moveit_config/     ← 기존 (MoveIt2)

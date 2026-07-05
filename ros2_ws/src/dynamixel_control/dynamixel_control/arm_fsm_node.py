@@ -24,12 +24,16 @@
 """
 from enum import Enum, auto
 
+import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from rclpy.time import Time
+from rclpy.duration import Duration as RclpyDuration
 from tf2_ros import Buffer, TransformListener, TransformException
+from tf2_geometry_msgs import do_transform_pose
 
 from builtin_interfaces.msg import Duration
 from sensor_msgs.msg import JointState
@@ -38,9 +42,19 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (MotionPlanRequest, Constraints, PositionConstraint,
-                             OrientationConstraint, BoundingVolume)
+                             OrientationConstraint, BoundingVolume, RobotState)
+from moveit_msgs.srv import GetPositionFK
 from shape_msgs.msg import SolidPrimitive
 from robot_arm_msgs.msg import ArrivalStatus, ChassisMode, ArmStatus, DetectedObject
+
+
+# ⚠️ URDF/SRDF가 아직 팔 5축 중 3축(joint_1~3)만 반영(WIP, CAD 미완성) — MoveIt의
+# 6DOF pose goal(position+orientation)은 이 3관절로 일반적으로 풀리지 않음(HW-7 실측
+# 확인: /compute_ik가 현재 실제 tip pose에도 NO_IK_SOLUTION 반환). URDF가 5축으로
+# 확장되기 전까지는 'analytic' 모드(FK+수치 자코비안으로 위치만 맞추는 3DOF IK, 방향
+# 무시)를 기본으로 쓰고, MoveGroup 경로(§6 결정 '가')는 남겨두되 ik_mode:='moveit'로
+# 전환 가능하게만 유지.
+ARM_JOINT_NAMES = ['joint_1', 'joint_2', 'joint_3']
 
 
 # ──────────────────────────────────────────────
@@ -86,7 +100,10 @@ class ArmFsmNode(Node):
         # ── 파라미터 ──────────────────────────────
         # MoveIt
         self.declare_parameter('planning_group', 'arm')          # SRDF group
-        self.declare_parameter('tip_link', 'link_6')             # 그리퍼 부모 링크
+        # ⚠️ URDF 미완성(WIP) 현재 tip: Link4_1_1 (실물 CAD 3관절만 반영, joint_4/5 축 아직
+        # URDF 미통합 — 실하드웨어는 1~5축 서보 5개 + 그리퍼 서보 1개 총 6개 존재).
+        # URDF가 5축 전체로 확장되면 이 기본값과 SRDF arm 그룹을 함께 갱신할 것.
+        self.declare_parameter('tip_link', 'Link4_1_1')          # 그리퍼 부모 링크
         self.declare_parameter('base_frame', 'base_link')        # planning frame (리프트 기준)
         self.declare_parameter('lift_height', 0.10)              # LIFT 시 base_link +Z [m]
         self.declare_parameter('pick_frame_id', 'camera_color_optical_frame')
@@ -95,6 +112,12 @@ class ArmFsmNode(Node):
         self.declare_parameter('planning_time', 5.0)
         self.declare_parameter('vel_scale', 0.1)                 # 저속(파지 안전)
         self.declare_parameter('acc_scale', 0.1)
+        # 'analytic'(기본, URDF 3관절 한정 수치 IK) | 'moveit'(URDF 5축 완성 후 전환)
+        self.declare_parameter('ik_mode', 'analytic')
+        self.declare_parameter('ik_max_iters', 8)
+        self.declare_parameter('ik_tol', 0.01)          # [m] 위치 수렴 허용오차
+        self.declare_parameter('ik_accept_tol', 0.03)   # [m] 최종 실패 판정 기준
+        self.declare_parameter('arm_move_speed', 0.5)   # [rad/s] 직접명령 시 소요시간 추정용
         # 그리퍼 (prismatic finger, 단위 m — 실측 캘리브 필요)
         self.declare_parameter('gripper_joints', ['left_finger_joint', 'right_finger_joint'])
         self.declare_parameter('gripper_open', 0.02)
@@ -120,6 +143,11 @@ class ArmFsmNode(Node):
         self.planning_time = g('planning_time').value
         self.vel_scale = g('vel_scale').value
         self.acc_scale = g('acc_scale').value
+        self.ik_mode = g('ik_mode').value
+        self.ik_max_iters = int(g('ik_max_iters').value)
+        self.ik_tol = g('ik_tol').value
+        self.ik_accept_tol = g('ik_accept_tol').value
+        self.arm_move_speed = g('arm_move_speed').value
         self.gripper_joints = list(g('gripper_joints').value)
         self.gripper_open = g('gripper_open').value
         self.gripper_close = g('gripper_close').value
@@ -141,9 +169,21 @@ class ArmFsmNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self._move = ActionClient(self, MoveGroup, 'move_action')          # MoveIt
+        self._move = ActionClient(self, MoveGroup, 'move_action')          # MoveIt (ik_mode=='moveit')
         self._grip = ActionClient(self, FollowJointTrajectory,
                                   '/gripper_controller/follow_joint_trajectory')
+
+        # analytic IK 경로 (ik_mode=='analytic', 기본): FK 서비스 + 직접 관절궤적 publish
+        # ⚠️ FK 호출은 _tick(타이머 콜백) 안에서 블로킹 대기함 — self 를 spin하면 이미
+        # 실행 중인 콜백을 재진입 spin 하게 되어 응답을 못 받고 타임아웃(실측 확인:
+        # 독립 스크립트로는 2회 반복만에 수렴하는데 노드 내부에서는 즉시 실패).
+        # 별도 헬퍼 노드/이그제큐터로 분리해서 우회.
+        self._fk_node = rclpy.create_node('arm_fsm_fk_client')
+        self._fk_client = self._fk_node.create_client(GetPositionFK, '/compute_fk')
+        self._arm_traj_pub = self.create_publisher(
+            JointTrajectory, '/arm_controller/joint_trajectory', 10)
+        self._joint_position = {}          # joint_name -> position(rad), /joint_states 에서 갱신
+        self._arm_move_deadline = None      # analytic 이동 완료 예상 시각
 
         # ── 내부 상태 ─────────────────────────────
         self.state = State.IDLE
@@ -193,10 +233,16 @@ class ArmFsmNode(Node):
         for i, name in enumerate(msg.name):
             if i < len(msg.effort):
                 self._joint_effort[name] = msg.effort[i]
+            if i < len(msg.position):
+                self._joint_position[name] = msg.position[i]
 
     # ── FSM tick ───────────────────────────────
 
     def _tick(self):
+        if (self._motion_state == 'active' and self._arm_move_deadline is not None
+                and self.get_clock().now() >= self._arm_move_deadline):
+            self._motion_state = 'done'
+            self._arm_move_deadline = None
         handler = getattr(self, f'_do_{self.state.name.lower()}', None)
         if handler:
             handler()
@@ -214,14 +260,23 @@ class ArmFsmNode(Node):
         self._transition(State.PLAN)
 
     def _do_plan(self):
-        """MoveIt에 파지 pose 목표 전송(IK·경로계획 위임). 디스패치만 하고 DESCEND에서 대기."""
+        """파지 목표로 이동 시작. 디스패치만 하고 DESCEND에서 대기."""
         self._publish_status(ARM_PLANNING)
-        grasp_pose = self._grasp_pose()
-        if grasp_pose is None:
+        if self.ik_mode == 'moveit':
+            grasp_pose = self._grasp_pose()
+            if grasp_pose is None:
+                self._publish_status(ARM_FAILED)
+                self._transition(State.IDLE)
+                return
+            self._begin_arm_move(grasp_pose)
+            self._transition(State.DESCEND)
+            return
+
+        target = self._grasp_target_xyz()
+        if target is None or not self._move_to_xyz(target):
             self._publish_status(ARM_FAILED)
             self._transition(State.IDLE)
             return
-        self._begin_arm_move(grasp_pose)
         self._transition(State.DESCEND)
 
     def _do_descend(self):
@@ -251,20 +306,29 @@ class ArmFsmNode(Node):
             self._transition(State.PLAN)
 
     def _do_lift(self):
-        """수직 리프트 → 운반 자세. TODO: base_link +Z 리프트 pose(TF 필요)."""
+        """수직 리프트 → 운반 자세 (base_link +Z, 현재 tip TF 기준)."""
         self._publish_status(ARM_EXECUTING)
-        lift_pose = self._carry_pose()
-        if lift_pose is None:
-            self.get_logger().warn('TODO: LIFT/CARRY 목표 pose 미구현 — 스킵하고 CARRY 진입')
-            self._transition(State.CARRY)
-            return
-        if self._motion_state == 'idle':
-            self._begin_arm_move(lift_pose)
-            return
         if self._motion_state == 'active':
             return
-        self._motion_state = 'idle'
-        self._transition(State.CARRY)
+        if self._motion_state == 'done':
+            self._motion_state = 'idle'
+            self._transition(State.CARRY)
+            return
+
+        # 'idle' — 리프트 모션 시작
+        if self.ik_mode == 'moveit':
+            lift_pose = self._carry_pose()
+            if lift_pose is None:
+                self.get_logger().warn('carry pose 미구현/TF 실패 — 스킵하고 CARRY 진입')
+                self._transition(State.CARRY)
+                return
+            self._begin_arm_move(lift_pose)
+            return
+
+        target = self._lift_target_xyz()
+        if target is None or not self._move_to_xyz(target):
+            self.get_logger().warn('LIFT 목표 계산/이동 실패 — 스킵하고 CARRY 진입')
+            self._transition(State.CARRY)
 
     def _do_carry(self):
         """운반 중 그리퍼 effort 감시 → 급감 시 DROP."""
@@ -337,6 +401,7 @@ class ArmFsmNode(Node):
         if self._arm_goal_handle is not None:
             self._arm_goal_handle.cancel_goal_async()
             self._arm_goal_handle = None
+        self._arm_move_deadline = None
         self._motion_state = 'idle'
 
     def _build_move_group_goal(self, pose_stamped):
@@ -412,6 +477,121 @@ class ArmFsmNode(Node):
         ps.pose.position.z = t.z + self.lift_height
         ps.pose.orientation = tf.transform.rotation
         return ps
+
+    # ── analytic IK (ik_mode=='analytic', URDF 3관절 한정) ─────
+
+    def _current_arm_joint_positions(self):
+        return [self._joint_position.get(j, 0.0) for j in ARM_JOINT_NAMES]
+
+    def _grasp_target_xyz(self):
+        """/pick_target(카메라 프레임) → base_frame 기준 (x,y,z). 방향은 무시(3DOF 한계)."""
+        if self.pick_target is None:
+            return None
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.base_frame, self.pick_frame_id, Time())
+        except TransformException as e:
+            self.get_logger().warn(f'grasp target TF 조회 실패: {e}')
+            return None
+        out = do_transform_pose(self.pick_target.pose, tf)
+        return (out.position.x, out.position.y, out.position.z)
+
+    def _lift_target_xyz(self):
+        """현재 tip 위치(base_frame)에서 +Z lift_height 만큼 든 목표."""
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_link, Time())
+        except TransformException as e:
+            self.get_logger().warn(f'lift target TF 조회 실패: {e}')
+            return None
+        t = tf.transform.translation
+        return (t.x, t.y, t.z + self.lift_height)
+
+    def _fk_tip(self, q):
+        """3관절 각도 q=[j1,j2,j3] → tip_link 위치(base_frame) np.array, 실패 시 None."""
+        req = GetPositionFK.Request()
+        req.header.frame_id = self.base_frame
+        req.fk_link_names = [self.tip_link]
+        req.robot_state = RobotState()
+        req.robot_state.joint_state.name = list(ARM_JOINT_NAMES)
+        req.robot_state.joint_state.position = [float(v) for v in q]
+        if not self._fk_client.service_is_ready():
+            return None
+        future = self._fk_client.call_async(req)
+        rclpy.spin_until_future_complete(self._fk_node, future, timeout_sec=1.0)
+        res = future.result()
+        if res is None or not res.pose_stamped:
+            return None
+        p = res.pose_stamped[0].pose.position
+        return np.array([p.x, p.y, p.z])
+
+    def _solve_position_ik(self, target_xyz, q_init):
+        """FK + 수치 자코비안(finite-difference) 로 위치만 맞추는 3DOF IK.
+
+        URDF가 joint_1~3만 반영해 MoveIt 6DOF pose IK가 원천 불가(HW-7 실측 확인,
+        compute_ik가 현재 실제 tip pose에도 NO_IK_SOLUTION). 방향은 포기하고 위치만
+        댐핑 최소자승(Levenberg-Marquardt 유사)으로 반복 수렴.
+        """
+        q = np.array(q_init, dtype=float)
+        target = np.array(target_xyz, dtype=float)
+        eps = 0.05
+        lam = 0.01
+        max_step = 0.4
+
+        p = self._fk_tip(q)
+        if p is None:
+            return None
+
+        for _ in range(self.ik_max_iters):
+            err = target - p
+            if np.linalg.norm(err) < self.ik_tol:
+                return q.tolist()
+            J = np.zeros((3, 3))
+            for i in range(3):
+                dq = np.zeros(3)
+                dq[i] = eps
+                p2 = self._fk_tip(q + dq)
+                if p2 is None:
+                    return None
+                J[:, i] = (p2 - p) / eps
+            delta = J.T @ np.linalg.solve(J @ J.T + lam * np.eye(3), err)
+            norm = np.linalg.norm(delta)
+            if norm > max_step:
+                delta *= max_step / norm
+            q = q + delta
+            p = self._fk_tip(q)
+            if p is None:
+                return None
+
+        if np.linalg.norm(target - p) < self.ik_accept_tol:
+            return q.tolist()
+        return None
+
+    def _move_to_xyz(self, target_xyz):
+        """target_xyz(base_frame) 로 analytic IK 계산 → /arm_controller/joint_trajectory 직접 발행."""
+        q_current = self._current_arm_joint_positions()
+        solution = self._solve_position_ik(target_xyz, q_current)
+        if solution is None:
+            self.get_logger().warn(f'analytic IK 실패 — 목표 도달 불가: {target_xyz}')
+            return False
+
+        delta = max(abs(a - b) for a, b in zip(solution, q_current))
+        duration = max(1.0, min(5.0, delta / max(self.arm_move_speed, 0.05)))
+
+        traj = JointTrajectory()
+        traj.joint_names = list(ARM_JOINT_NAMES)
+        pt = JointTrajectoryPoint()
+        pt.positions = [float(v) for v in solution]
+        pt.time_from_start = Duration(sec=int(duration))
+        traj.points.append(pt)
+        self._arm_traj_pub.publish(traj)
+
+        self._motion_state = 'active'
+        self._motion_ok = True
+        self._arm_move_deadline = self.get_clock().now() + RclpyDuration(
+            seconds=duration + 0.5)
+        self.get_logger().info(
+            f'analytic IK: {[round(v, 3) for v in solution]} rad, {duration:.1f}s 예상')
+        return True
 
     # ── 그리퍼 ─────────────────────────────────
 
