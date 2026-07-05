@@ -1,6 +1,9 @@
 services:
   ros2:
-    build: .
+    build:
+      context: .
+      platforms:
+        - linux/arm64
     container_name: ros2_humble
     stdin_open: true
     tty: true

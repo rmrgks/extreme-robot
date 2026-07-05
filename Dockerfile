@@ -1,4 +1,4 @@
-FROM osrf/ros:humble-desktop-full
+FROM ros:humble-ros-base
 
 # 한글 로케일 설정
 RUN apt-get update && apt-get install -y locales \
@@ -9,6 +9,7 @@ ENV LANG=ko_KR.UTF-8
 
 # 필수 패키지 설치
 RUN apt-get update && apt-get install -y \
+    ros-humble-desktop \
     ros-humble-turtlesim \
     ros-humble-teleop-twist-keyboard \
     ros-humble-rqt \
@@ -21,7 +22,18 @@ RUN apt-get update && apt-get install -y \
     nano \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install "numpy<2" ultralytics && pip3 uninstall -y opencv-python opencv-python-headless
+RUN apt-get update && apt-get install -y \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install "numpy<2" ultralytics pyrealsense2 && pip3 uninstall -y opencv-python opencv-python-headless
 
 # MoveIt (로봇팔 경로계획) + ros2_control (mock 하드웨어/컨트롤러)
 # - ros-humble-moveit: move_group, OMPL, KDL IK, RViz MotionPlanning 플러그인

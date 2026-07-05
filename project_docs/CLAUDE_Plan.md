@@ -4,7 +4,7 @@
 > 인식 소스 단일화(로봇팔 Jetson YOLO) + 위치/라벨 통합 전송을 위한 커스텀 msg 패키지 기반 개발 계획.
 > 파워트레인 자율주행 방식(레인 추종, Nav2 미사용) 연동 인터페이스 포함.
 > **문서 완료 목표: 7/19** (국방로봇경진대회 제출 마감 7/31 이전)
-> 최종 업데이트: 2026-06-25 (파워트레인 자율주행 회신 + 비전 파이프라인 실증 스펙 반영)
+> 최종 업데이트: 2026-07-04 (커밋 `3bed8bd` — HW-2~6 실하드웨어 테스트: 브릿지 부재 서보 방어, 손목 카메라 TF, 디버그 스트리밍 추가. 이전: 2026-06-25 파워트레인 자율주행 회신 + 비전 파이프라인 실증 스펙 반영)
 
 ## 워크스페이스 구조
 
@@ -123,7 +123,7 @@ string status   # PERCEIVING, PLANNING, EXECUTING, DONE
 - `/pick_target`: 픽 대상 클래스 선별 → 하나만 publish. **QoS `transient_local`(latched)** 로 줘서 "도착 → 집어" 타이밍에 최신 타깃 안 놓치게
 - 분리 이유: 로봇팔 FSM이 매번 배열 필터링 안 해도 되고 픽 트리거 명확
 - `/chassis_mode`·`/arm_status`는 위 메시지 설계 포인트 참고 (역할 분리 이유 동일하게 적용)
-- **제어-플레인 토픽/액션 (Phase 3 구현, 팀 간 인터페이스 아님 — 로봇팔 내부):** `moveit_dynamixel_bridge`가 `/joint_states`(position+**effort=raw 전류**) publish + `/arm_controller`·`/gripper_controller`의 `follow_joint_trajectory` 액션 서버 제공. `arm_fsm`은 MoveIt `move_action`(MoveGroup)로 팔, `/gripper_controller`로 그리퍼 구동. 카메라 TF는 `camera_tf.launch.py`(static)가 `base_link↔camera_color_optical_frame` 발행.
+- **제어-플레인 토픽/액션 (Phase 3 구현, 팀 간 인터페이스 아님 — 로봇팔 내부):** `moveit_dynamixel_bridge`가 `/joint_states`(position+**effort=raw 전류**) publish + `/arm_controller`·`/gripper_controller`의 `follow_joint_trajectory` 액션 서버 제공(2026-07-04: 토크 활성화 성공한 ID만 SyncRead 등록해 부재 서보에 방어적). `arm_fsm`은 MoveIt `move_action`(MoveGroup)로 팔, `/gripper_controller`로 그리퍼 구동. 카메라 TF는 `camera_tf.launch.py`(static)가 전방 RGB-D `base_link↔camera_color_optical_frame` + (신규, 2026-07-04) 손목 RGB `base_link↔wrist_camera_link`(홈 포즈 기준 placeholder) 발행. 인식 노드는 원격 모니터링용 `/perception/debug_image`(bbox·마스크·거리 오버레이)도 발행하며, `stream_node`가 이를 H.264/SRT로 PC에 스트리밍(신규, 2026-07-04).
 
 ---
 
