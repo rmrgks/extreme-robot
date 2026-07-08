@@ -415,12 +415,31 @@ class PerceptionNode(Node):
             y2 = y1 + obj.bbox.height
             cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
 
-            # 텍스트: 클래스명 + confidence + 거리
+            # 텍스트: 클래스명 + confidence + 거리 + yaw(PCA)
             z = obj.pose.position.z
             depth_str = f' {z:.2f}m' if z != 0.0 else ''
-            label = f'{obj.class_name} {obj.confidence:.2f}{depth_str}'
+            q = obj.pose.orientation
+            has_yaw = not (q.x == 0.0 and q.y == 0.0 and q.z == 0.0 and q.w == 1.0)
+            yaw_str = ''
+            if has_yaw:
+                yaw_rad = 2.0 * math.atan2(q.z, q.w)
+                yaw_deg = math.degrees(yaw_rad)
+                yaw_str = f' yaw={yaw_deg:.0f}deg'
+            label = f'{obj.class_name} {obj.confidence:.2f}{depth_str}{yaw_str}'
             cv2.putText(overlay, label, (x1, max(y1 - 6, 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+            # PCA 주축 방향 시각화 (centroid에서 yaw 방향으로 선 긋기, ±180° 모호성 있어 양방향 표시)
+            if has_yaw and binmask is not None and binmask.any():
+                ys_m, xs_m = np.nonzero(binmask)
+                cu, cvv = float(xs_m.mean()), float(ys_m.mean())
+                length = 0.6 * max(x2 - x1, y2 - y1)
+                dx = length * math.cos(yaw_rad)
+                dy = length * math.sin(yaw_rad)
+                p1 = (int(cu - dx), int(cvv - dy))
+                p2 = (int(cu + dx), int(cvv + dy))
+                cv2.line(overlay, p1, p2, (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.circle(overlay, (int(cu), int(cvv)), 3, (0, 0, 255), -1)
         return overlay
 
     def _grab_frame(self):
