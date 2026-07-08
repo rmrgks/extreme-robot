@@ -8,6 +8,8 @@
        link1側 joint(9,17)·link3側 joint(11,19)만 남기고 link2/link4側 중복 joint(10,12,18,20)는 제거.
        -> link2/link4는 top_plate에 직접 매달린 독립 조인트로 렌더링되어 항상 평행 유지되는
        실제 기구 커플링은 반영되지 않음(0도 홈포즈 시각화/충돌형상 확인용, 구동 로직은 실서보 2개(XC430 x2)로 별도 처리) -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="gripper_a">
+
 <link name="gripper_a_base_link">
   <inertial>
     <origin xyz="-0.06930330432389567 0.1480589720476463 -0.025544286170088252" rpy="0 0 0" />
@@ -474,5 +476,7 @@
   <parent link="gripper_a_base_link" />
   <child link="gripper_a_top_plate" />
 </joint>
+
+</robot>
 
 

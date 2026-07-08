@@ -1,10 +1,26 @@
 # 작업 인수인계 지시서
 
 > **대상**: 다음 Claude Code 세션  
-> **최종 업데이트**: 2026-07-04 (커밋 `3bed8bd` — HW-2~6 실하드웨어 테스트 완료, 손목 카메라 TF·디버그 스트리밍 추가)  
+> **최종 업데이트**: 2026-07-08 (브랜치 `Gripper_YOLO_FSM` — 그리퍼 URDF 모듈화 gripper_a xacro 파싱 버그 수정·검증)  
 > **기준 문서**: `/home/jo/ros2_ws/CLAUDE.md` (전체 통합 계획)  
 > **레포 경로**: `/home/jo/ros2_ws/extreme-robot/`  
 > **ROS2 소스**: `extreme-robot/ros2_ws/src/`
+
+---
+
+## 그리퍼 URDF 모듈화 — gripper_a xacro 파싱 버그 수정·검증 (2026-07-08, 브랜치 `Gripper_YOLO_FSM`)
+
+`main`에서 분기한 `Gripper_YOLO_FSM` 브랜치에 `ddkk0714/main`의 `b4aa455`(그리퍼 모듈화 — gripper_a URDF 추가, 5217073 위에 커밋)를 fast-forward로 받아옴. 이 커밋이 추가한 `urdf/grippers/gripper_a.xacro`(Fusion 360 fusion2urdf export 편입, `gripper_a_` prefix, 4절링크 닫힌 루프 단순화) + `meshes/grippers/gripper_a/`(mesh 16개) + `urdf/robot_arm.urdf.xacro`(신규, 몸체+그리퍼 xacro:include, `wrist_to_gripper` fixed joint)를 xacro로 실제 처리해 검증.
+
+- **버그 발견·수정**: `gripper_a.xacro`에 `<robot>` 루트 태그가 없어 `xacro:include`가 `junk after document element`로 즉시 실패. 파일 앞뒤에 `<robot xmlns:xacro="..." name="gripper_a">...</robot>` 래퍼 추가로 해결(내용은 그대로).
+- **검증 절차/결과** (컨테이너 내부, `docker exec ros2_humble`):
+  1. `colcon build --packages-select robot_arm_description` — 성공
+  2. `xacro robot_arm.urdf.xacro -o /tmp/robot_arm_out.urdf` — 에러 없이 처리됨 (link 57개, joint 61개)
+  3. `check_urdf /tmp/robot_arm_out.urdf` — `Successfully Parsed XML`, 단일 트리 구조(중복 parent 없음) 확인
+  4. 트리 확인: `...→ module_connector_5axis_Component41_1 → wrist_to_gripper(fixed) → gripper_a_base_link → ...`
+  5. mesh 참조 57개(`package://robot_arm_description/...`) 전부 실제 파일로 해석됨 — 누락 0개
+- **아직 안 한 것**: RViz 시각화 확인(수동), `wrist_to_gripper` origin 오프셋(x=147.544/y=0/z=239.50mm) CAD 재실측, `display.launch.py`/`robot_arm_moveit_config`를 이 xacro 경로로 배선.
+- **커밋 여부**: `gripper_a.xacro`의 `<robot>` 래퍼 수정은 아직 미커밋 — 다음 세션(또는 이어서) 커밋 필요.
 
 ---
 
