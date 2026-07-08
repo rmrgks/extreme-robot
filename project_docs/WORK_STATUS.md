@@ -1,10 +1,25 @@
 # 작업 인수인계 지시서
 
 > **대상**: 다음 Claude Code 세션  
-> **최종 업데이트**: 2026-07-08 (브랜치 `Gripper_YOLO_FSM` — 그리퍼 URDF 모듈화 gripper_a xacro 파싱 버그 수정·검증)  
+> **최종 업데이트**: 2026-07-08 (브랜치 `Gripper_YOLO_FSM` — YOLO 인식 모델 Roboflow `best.pt` 교체 + 그리퍼 URDF 모듈화 gripper_a xacro 파싱 버그 수정·검증)  
 > **기준 문서**: `/home/jo/ros2_ws/CLAUDE.md` (전체 통합 계획)  
 > **레포 경로**: `/home/jo/ros2_ws/extreme-robot/`  
 > **ROS2 소스**: `extreme-robot/ros2_ws/src/`
+
+---
+
+## YOLO 인식 모델 교체 — Roboflow 커스텀 학습 가중치 `best.pt` 적용 (2026-07-08, 브랜치 `Gripper_YOLO_FSM`)
+
+기존 `perception_node`는 COCO 사전학습 `yolov8n-seg.pt`(사람/병/의자 등 범용 클래스)로 markerless pose를 뽑고 있었음. 대회 타겟 물체로 직접 라벨링·학습한 Roboflow 모델을 붙이는 작업.
+
+- `ddkk0714/main`의 `b605666`(YOLO seg 학습 가중치 `best.pt` 추가 — `ros2_ws/src/robot_arm_perception/models/best.pt`, 6.2MB)을 그리퍼 커밋(`b4aa455`)과 함께 fast-forward로 받아옴. Notion "Roboflow 데이터 관리" 문서(라벨링→export→`best.pt` 로컬 배치 흐름)를 참고해 진행.
+- `perception_node.py`의 `model_path` 파라미터 기본값을 `yolov8n-seg.pt` → `src/robot_arm_perception/models/best.pt`로 교체(커밋 `c3bc32e`). `CLAUDE.md`도 함께 갱신.
+- **설계상 안전장치**: 코드가 이미 마스크 유무에 관계없이 동작하도록 짜여 있음 — seg 모델이면 markerless pose(translation+PCA yaw) 전체 활성, detection 전용 모델이면 마스크가 없어 bbox 중심 depth로 translation만 폴백하고 orientation은 스킵. 그래서 새 모델이 Instance Segmentation인지 Object Detection인지 몰라도 즉시 깨지진 않음.
+- **미확인 — 다음 세션에서 컨테이너 안에서 확인 필요**:
+  1. `python3 -c "from ultralytics import YOLO; m=YOLO('src/robot_arm_perception/models/best.pt'); print(m.task, m.names)"`로 이 모델이 `segment`인지 `detect`인지, 실제 클래스명이 뭔지 확인 (torch/ultralytics가 host엔 없어서 이번 세션에선 확인 못 함).
+  2. 확인된 클래스명으로 `-p classes:='...' -p pick_classes:='...'`를 맞춰 실행 테스트(`ros2 run robot_arm_perception perception_node --ros-args -p model_path:=src/robot_arm_perception/models/best.pt ...`). 기존 COCO 클래스(`bottle`/`cell phone` 등)는 더 이상 안 맞을 가능성 높음.
+  3. 실기 카메라로 대회 타겟 인식률이 기존 COCO 모델 대비 실제로 개선됐는지 실측.
+- **커밋 여부**: 모델 교체(`c3bc32e`)는 커밋 완료. `models/best.pt` 자체(`b605666`)는 `ddkk0714/main`에서 받아온 상태로 이미 커밋됨.
 
 ---
 
