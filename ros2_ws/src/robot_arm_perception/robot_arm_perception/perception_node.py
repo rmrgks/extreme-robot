@@ -142,7 +142,7 @@ class PerceptionNode(Node):
     def __init__(self):
         super().__init__('perception_node')
 
-        self.declare_parameter('model_path', 'yolov8n-seg.pt')  # seg 모델 필수
+        self.declare_parameter('model_path', 'src/robot_arm_perception/models/best.pt')  # Roboflow 커스텀 학습 모델 (2026-07-08)
         self.declare_parameter('backend', 'pt')          # 'pt' | 'trt'
         self.declare_parameter('conf_threshold', 0.4)
         self.declare_parameter('classes', '')            # 쉼표구분 필터, 빈값=전체
