@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!-- 그리퍼 모듈화 메인 xacro: 몸체(robot_arm.urdf) + 그리퍼(urdf/grippers/*.xacro)를 조립.
+     그리퍼 모듈화 가이드(§4)의 sirumi.urdf.xacro 패턴을 그대로 적용.
+     robot_arm.urdf는 <robot> 태그를 가진 완성 URDF지만, xacro:include는 루트 태그 이름과
+     무관하게 자식 엘리먼트를 그대로 이 파일의 <robot>에 이어붙이므로 별도 body-only 파일 없이 재사용 가능.
+     wrist_to_gripper 조인트의 origin은 module_connector_5axis_Component41_1(팔 끝단) 원점 기준
+     실측 마운트 위치(x=147.544mm, y=0, z=239.50mm, base_link 기준)에서 역산한 값 — CAD 실측 재확인 필요. -->
+<robot name="robot_arm" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:arg name="gripper" default="gripper_a"/>
+
+  <xacro:include filename="$(find robot_arm_description)/urdf/robot_arm.urdf"/>
+  <xacro:include filename="$(find robot_arm_description)/urdf/grippers/$(arg gripper).xacro"/>
+
+  <joint name="wrist_to_gripper" type="fixed">
+    <origin xyz="0.136594 0.074544 0.0" rpy="0 0 0"/>
+    <parent link="module_connector_5axis_Component41_1"/>
+    <child link="$(arg gripper)_base_link"/>
+  </joint>
+
+</robot>
