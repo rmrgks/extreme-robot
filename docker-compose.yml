@@ -13,10 +13,18 @@ services:
       - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
       - PULSE_SERVER=${PULSE_SERVER}
       - QT_X11_NO_MITSHM=1
+      - XAUTHORITY=/root/.Xauthority
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - LD_LIBRARY_PATH=/usr/local/cuda-12.6/targets/aarch64-linux/lib:/opt/cudnn-libs
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /mnt/wslg:/mnt/wslg
       - ./ros2_ws:/root/ros2_ws
       - /dev:/dev
+      - /usr/local/cuda-12.6:/usr/local/cuda-12.6:ro
+      - /home/zetin/.cudnn-libs:/opt/cudnn-libs:ro
+      - /home/zetin/.Xauthority:/root/.Xauthority:ro
     network_mode: host
     privileged: true
+    runtime: nvidia
