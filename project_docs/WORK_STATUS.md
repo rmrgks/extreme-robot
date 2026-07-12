@@ -1,10 +1,29 @@
 # 작업 인수인계 지시서
 
 > **대상**: 다음 Claude Code 세션  
-> **최종 업데이트**: 2026-07-08 (브랜치 `Gripper_YOLO_FSM` — YOLO 인식 모델 Roboflow `best.pt` 교체 + 그리퍼 URDF 모듈화 gripper_a xacro 파싱 버그 수정·검증)  
+> **최종 업데이트**: 2026-07-13 (`20260708_YOLO_URDF_Change`를 `Gripper_YOLO_FSM`으로 merge — YOLO 재학습 seg 모델 교체·검증 + HW-7/8 실기 검증 + 그리퍼 URDF 모듈화 통합)  
 > **기준 문서**: `/home/jo/ros2_ws/CLAUDE.md` (전체 통합 계획)  
 > **레포 경로**: `/home/jo/ros2_ws/extreme-robot/`  
 > **ROS2 소스**: `extreme-robot/ros2_ws/src/`
+
+---
+
+## YOLO 인식 모델 재교체 — 재학습 segmentation 가중치 적용 (2026-07-13, 브랜치 `Gripper_YOLO_FSM`)
+
+아래 2026-07-08 섹션에서 "미확인"으로 남겨뒀던 `best.pt`의 task/클래스명을 확인하고, 이후
+Roboflow에서 **segmentation으로 재학습한** 가중치로 다시 교체함.
+
+- 컨테이너 안에서 확인: `task: segment`, `names: {0: 'box-segmentation'}` — 클래스 1개.
+- `models/best.pt`를 재학습 가중치로 교체(커밋 `774edb2`). detect 전용 모델을 대비해 만들어뒀던
+  `_color_mask_in_box()` HSV 폴백은 이번 모델(seg)에는 불필요하지만 이후 detect 전용 모델로
+  되돌아갈 가능성을 감안해 코드에는 유지.
+- 실기 RealSense로 `perception_node`+`stream_node` 기동 후 SRT로 원격 확인 — `box-segmentation`
+  검출 및 pick 타겟 지정(초록 오버레이) 정상 확인.
+- **주의**: 이 작업 중 `_fill_markerless_pose()`의 PCA yaw quaternion 대입 코드를 제거했는데,
+  아래 HW-8 섹션 이후 `20260708_YOLO_URDF_Change` 브랜치에서도 디버그 오버레이의 PCA yaw 표시를
+  독립적으로 제거한 상태였음(동일 위치라 머지는 충돌 없이 자동 해소됨). 사용자가 "yaw view는
+  임시로 꺼둔 것"이라며 복원을 요청해 다시 살리는 작업 진행 중 — markerless pose의 orientation은
+  설계상 PCA 주축각으로 채우는 게 맞음.
 
 ---
 
@@ -39,6 +58,50 @@
 
 ---
 
+## HW-8 그리퍼 반응 테스트 + Profile 과부하 트립 원인 규명 (2026-07-08, 미커밋)
+
+HW-7 다음 세션. 그리퍼 단독(병 인식→닫기/없음→열기) 반응 테스트를 실기로 진행하며 발견한
+과부하 트립 문제의 원인을 규명하고 해결.
+
+- **신규 스크립트** `ros2_ws/hw7_gripper_bottle_test.py` (컨테이너 내부 독립 실행 스크립트,
+  `capture_pick.py`/`move_servo.py`와 같은 패키지 미편입 임시 테스트 — ros2_ws root, 미추적).
+  `/pick_target`은 transient_local(latched)라 병이 사라져도 마지막 값이 남아 "없음"을 감지 못함
+  → 매 프레임 발행되는 `/detected_objects`로 현재 프레임 기준 병 유무 판단. XL430 그리퍼에
+  `moveit_dynamixel_bridge` 경유 없이 `dynamixel_sdk`로 직접 write.
+- **그리퍼 서보 확정**: id=5, model=1060(XL430-W250), Operating Mode=3(Position Control).
+  포지션 실측 조정 끝에 **닫힘 280°(tick 3186) / 열림 215°(tick 2446)**로 확정
+  (`tick = round(deg/360*4096)`). `bridge.log`에 남아있던 "gripper id=5 토크 활성화 실패"는
+  그 세션에 실장치 없이 컨테이너를 띄웠던 것으로 추정 — id=5 자체는 정상 확인.
+- **perception_node 기본 해상도 불일치 발견**: 기본 `width=848,height=480`이 이 D435IF
+  유닛 컬러 센서에서 미지원 조합이라 `RealSense init failed: Couldn't resolve requests`로
+  실패. 이 카메라는 컬러 스트림이 424x240/640x480/1280x720/1920x1080만 지원(848x480은
+  depth/IR 전용) — **640x480@30fps**로 띄워야 함.
+- **핵심 발견 — 매 그리퍼 동작마다 토크 자동 해제(과부하 트립)**: 처음엔 원인 불명(Hardware
+  Error Status가 읽을 때마다 0이라 안 보임)이었으나, Profile Acceleration/Velocity(주소
+  108/112)가 **기본값 0(=최고속 즉시 이동)**이라 매 이동마다 순간 전류가 튀어 과부하 보호가
+  걸리는 것으로 확인 — 재현율 100%(열림/닫힘 양방향 공통), 명령 후 0.3초 내 트립. Hardware
+  Error Status는 트립 조건 해소 후 자동으로 0 복귀해 관찰 시점엔 안 보였을 뿐 실제로는
+  발생하고 있었음.
+  - **해결**: Profile Acceleration=25, Profile Velocity=80으로 설정 후 60초 반복 토글
+    테스트에서 트립 0건 확인(accel=10/velocity=30도 안전하지만 더 느림, 도달 약 0.6초 vs
+    25/80의 약 0.3~0.6초). 스크립트 기본값으로 반영.
+  - 예기치 않은 토크 해제에 대한 방어로 2초 주기 하트비트(`_reassert_torque`)와 위치 명령
+    직전 재활성화를 `_write_position`에 추가 — 근본 원인(Profile) 해결 후에도 안전망으로 유지.
+- **실기 검증 완료**: bottle 인식 → 그리퍼 닫힘(280°) → bottle 사라짐 → 그리퍼 열림(215°),
+  60초 연속 테스트에서 여러 차례 안정적으로 토글, 트립 없음. accel=0/velocity=0(최고속)으로
+  되돌려 트립 재현도 별도 확인(양방향 100% 재현) 후 다시 안전 설정(25/80)으로 복구.
+- **다음 세션 확인 포인트**:
+  1. 그리퍼 각도(280°/215°)가 실제 파지 대상(병)에 맞는 stroke인지 재확인 (지금은 열림/닫힘
+     반응 로직 검증 목적으로 임의 조정한 값).
+  2. `moveit_dynamixel_bridge.py`의 `gripper_open_tick`(2400)/`gripper_close_tick`(2048)
+     placeholder를 이번 실측값(2446/3186)으로 갱신할지, 그리고 그 브릿지의 즉시-이동 방식
+     (Profile Accel/Velocity 미설정)에도 동일한 과부하 트립 위험이 있는지 점검 — 브릿지는
+     아직 이 세션에서 발견한 Profile 이슈를 반영하지 않음.
+  3. `hw7_gripper_bottle_test.py`는 현재 ros2_ws root의 미추적 독립 스크립트 — 계속 쓸 거면
+     `dynamixel_control` 패키지 정식 유틸로 편입 검토.
+
+---
+
 ## HW-2~6 실하드웨어 테스트 완료 (2026-07-04, 커밋 `3bed8bd`)
 
 Phase 3 문서화(아래 섹션들) 이후 실제 젯슨/서보/카메라로 진행한 하드웨어 검증 세션. 변경 6개 파일:
@@ -55,6 +118,24 @@ Phase 3 문서화(아래 섹션들) 이후 실제 젯슨/서보/카메라로 진
 **검증 상태**: 커밋 메시지상 "HW-2~6 실하드웨어 테스트 완료"이나, 이 문서의 나머지 섹션(그리퍼 tick/전류 임계값 실측, 카메라 마운트 캘리브 등)이 갱신되지 않았으므로 어디까지 실측 완료됐는지는 다음 세션에서 재확인 필요. 회귀 확인 포인트: SyncRead 필터링 변경 후 정상 서보들의 `/joint_states` 발행 주기·값이 기존과 동일한지.
 
 **진행 중(미커밋)**: 저장소 루트 `ros2_ws/`에 `check_servo.py`/`diag_servo.py`/`fix_servo.py`/`fix_servo2.py`/`move_servo.py` 임시 스크립트 존재 — ID 0 서보의 Operating Mode·Position Limit 이상 및 Hardware Error 복구(토크 OFF→리밋 재설정→리부트→토크 ON) 시도 흔적. 다음 세션에서 원인 파악 후 정리(성공했으면 삭제, 재현되면 `dynamixel_control`에 정식 유틸로 편입 검토).
+→ **HW-7(2026-07-05, 커밋 `3048f02`)에서 정식 커밋됨** (`fix_servo2.py` 포함). 아래 HW-7 섹션 참고 — ID 0 이상 자체의 근본 원인 확인 여부는 미기록, 다음 세션 재확인 필요.
+
+---
+
+## HW-7 실하드웨어 픽 시퀀스 검증 및 analytic IK 우회 경로 추가 (2026-07-05, 커밋 `3048f02`)
+
+HW-2~6 다음 세션. `arm_fsm`을 실제 서보로 처음 끝까지(인식→IK→하강→파지판정) 돌려본 세션. 핵심 발견은 **결정 '가'(MoveIt 단일 경로)가 현재 하드웨어에서 전제부터 깨져 있었다는 것**.
+
+- **핵심 발견 — MoveIt 6DOF IK 원천 불가**: URDF/SRDF가 아직 팔 5축 중 `joint_1`~`joint_3` **3축만** 반영(CAD 미완성, WIP). 이 상태로 MoveIt `/compute_ik`를 호출하면 **현재 실제 tip pose에 대해서도 `NO_IK_SOLUTION`**이 반환됨을 실측 확인 — 3관절로는 위치+방향(6DOF) 목표를 만족시킬 자유도가 애초에 없음(자유도 3 < 목표 자유도 6).
+- **대응 — analytic IK 우회 경로**: `arm_fsm_node.py`에 `ik_mode` 파라미터 신설, 기본값 `'analytic'`.
+  - MoveGroup(MoveIt) 대신 FK 서비스(`/compute_fk`) + 수치 자코비안(finite-difference, Levenberg-Marquardt 유사 댐핑 최소자승)으로 **위치만** 맞추는 3DOF IK(`_solve_position_ik`/`_fk_tip`)를 구현, 결과를 `/arm_controller/joint_trajectory`에 직접 publish. 방향(orientation)은 이번엔 포기.
+  - **폐기 아님 — 임시 우회**: 결정 '가'의 MoveGroup 경로(§6-A)는 코드에 그대로 남겨둠. URDF가 5축으로 확장되면 `ik_mode:='moveit'`로 전환해 즉시 재사용 가능.
+  - `tip_link` 파라미터 기본값을 placeholder에서 실제 SRDF 값(`Link4_1_1`)으로 수정.
+- **버그 수정 — FK 서비스 타임아웃**: `/compute_fk` 호출을 `_tick`(타이머 콜백) 안에서 `self`를 `spin_until_future_complete`하면, 이미 실행 중인 콜백을 재진입 spin하게 돼 응답을 못 받고 항상 타임아웃(독립 스크립트로는 2회 반복 만에 수렴하는데 노드 내부에서는 즉시 실패하는 걸로 실측 확인). → 별도 헬퍼 노드(`arm_fsm_fk_client`)로 FK 클라이언트를 분리해 우회.
+- **서보 디버깅 스크립트 정식 커밋**: HW-2~6 세션에 미커밋 상태로 남아있던 `check_servo.py`/`diag_servo.py`/`fix_servo.py`/`fix_servo2.py`(ID 0 서보 Operating Mode·Position Limit 이상 및 Hardware Error 복구용) + 실행 스크립트 `run_perception.sh`가 이번 커밋에 반영됨.
+- **실기 검증 결과**: bottle 인식 → analytic IK 계산 → 팔 하강 → 그리퍼 닫힘 → effort(전류) 기반 파지 판정까지 **실제 모터로 end-to-end 확인**. 단, 방향까지 맞추는 정밀 파지는 URDF가 5축으로 확장된 뒤(`ik_mode='moveit'` 전환 후)에야 가능.
+
+**검증 상태**: analytic 3DOF 경로는 실기 동작 확인됨(위치만). `ik_mode='moveit'` 경로는 URDF 5축 확장 전까지 검증 보류(코드는 유지, 전환 스위치만 남음). **다음 세션 확인 포인트**: (1) 서보 스크립트가 이전 세션의 ID 0 이상을 실제로 해결했는지, (2) `check_servo.py` 등을 삭제할지 `dynamixel_control` 정식 유틸로 편입할지, (3) URDF 5축 확장 일정.
 
 ---
 

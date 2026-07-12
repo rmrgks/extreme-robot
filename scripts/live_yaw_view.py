@@ -6,16 +6,13 @@
 전부 docker exec 로 컨테이너 안에서 돌리고, 이 스크립트는 그 기동/정지와
 로컬 SRT 수신 창(gst-launch)만 오케스트레이션한다.
 
-주의(2026-07-08): 대회 타겟 커스텀 모델 models/best.pt 는 task=detect 이며
-클래스가 'red and blue box' 하나뿐 — segmentation 마스크가 없어 PCA yaw가
-채워지지 않는다(오버레이에 yaw 텍스트/선분이 안 뜸, bbox depth translation만
-동작). yaw 오버레이 파이프라인 자체를 검증하려면 --model-path 로 기존
-yolov8n-seg.pt(COCO, seg) + --target-class 로 사각형 형태의 대체 클래스
-(예: book/laptop/cell phone)를 지정해서 확인한다.
+갱신(2026-07-13): 대회 타겟 커스텀 모델 models/best.pt를 재학습된 segmentation
+가중치로 교체(task=segment, 클래스 'box-segmentation' 1개). PCA yaw는 다시 활성화됨
+(_fill_markerless_pose에서 마스크 PCA 주축각 → orientation quaternion 대입 복원).
 
 사용:
-    python3 scripts/live_yaw_view.py start                                  # 기본: 대회 타겟 박스(yaw 안 나옴, depth만)
-    python3 scripts/live_yaw_view.py start --model-path /root/ros2_ws/yolov8n-seg.pt --target-class book  # yaw 파이프라인 검증용
+    python3 scripts/live_yaw_view.py start                                  # 기본: 대회 타겟 박스(seg, yaw 나옴)
+    python3 scripts/live_yaw_view.py start --model-path /root/ros2_ws/yolov8n-seg.pt --target-class book  # 다른 seg 모델로 비교 검증
     python3 scripts/live_yaw_view.py stop
 """
 import argparse
