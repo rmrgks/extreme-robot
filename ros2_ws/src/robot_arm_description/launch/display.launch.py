@@ -1,16 +1,16 @@
 import os
+import xacro
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    urdf_file = os.path.join(
+    xacro_file = os.path.join(
         get_package_share_directory('robot_arm_description'),
-        'urdf', 'robot_arm.urdf'
+        'urdf', 'robot_arm.urdf.xacro'
     )
 
-    with open(urdf_file, 'r') as f:
-        robot_description = f.read()
+    robot_description = xacro.process_file(xacro_file).toxml()
 
     return LaunchDescription([
         Node(
