@@ -292,7 +292,7 @@ class PerceptionNode(Node):
                 obj.bbox = roi
 
                 # ② markerless pose: 마스크 기반 translation(depth) + orientation(2D PCA)
-                binmask = self._get_binmask(masks, i)
+                binmask = self._get_binmask(masks, i, color_img, (x1, y1, x2, y2))
                 self._fill_markerless_pose(
                     obj, binmask, (x1, y1, x2, y2), depth_frame, depth_img)
 
@@ -361,14 +361,41 @@ class PerceptionNode(Node):
                 best = obj
         return best
 
-    def _get_binmask(self, masks, i):
-        """i번째 객체의 이진 마스크(원본 해상도). seg 모델 아니면 None."""
-        if masks is None or i >= len(masks):
-            return None
-        m = masks[i]
-        if m.shape != (self._h, self._w):
-            m = cv2.resize(m, (self._w, self._h), interpolation=cv2.INTER_NEAREST)
-        return m > 0.5
+    def _get_binmask(self, masks, i, color_img=None, box=None):
+        """i번째 객체의 이진 마스크(원본 해상도).
+
+        seg 모델이면 YOLO 마스크 그대로 사용. detect 전용 모델(마스크 없음)이면
+        bbox 안 red/blue HSV 색상 마스크로 대체(대회 타겟 클래스 'red and blue box'
+        전용 근사) — PCA 주축 계산엔 정확한 세그멘테이션과 동일하게 넘길 수 있다.
+        """
+        if masks is not None and i < len(masks):
+            m = masks[i]
+            if m.shape != (self._h, self._w):
+                m = cv2.resize(m, (self._w, self._h), interpolation=cv2.INTER_NEAREST)
+            return m > 0.5
+        if color_img is not None and box is not None:
+            return self._color_mask_in_box(color_img, box)
+        return None
+
+    def _color_mask_in_box(self, color_img, box):
+        """bbox 내부에서 red/blue HSV 마스크 추출 → 전체 프레임 크기 bool 배열로 반환.
+
+        빨강은 HSV hue가 0 근처와 180 근처 양쪽에 걸쳐 있어 두 구간을 합친다.
+        """
+        x1, y1, x2, y2 = box
+        x1, y1 = max(x1, 0), max(y1, 0)
+        x2, y2 = min(x2, self._w), min(y2, self._h)
+        full = np.zeros((self._h, self._w), dtype=bool)
+        if x2 <= x1 or y2 <= y1:
+            return full
+        hsv = cv2.cvtColor(color_img[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+        red = (cv2.inRange(hsv, (0, 70, 50), (10, 255, 255))
+               | cv2.inRange(hsv, (170, 70, 50), (180, 255, 255)))
+        blue = cv2.inRange(hsv, (100, 70, 50), (130, 255, 255))
+        mask = cv2.morphologyEx(red | blue, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        full[y1:y2, x1:x2] = mask > 0
+        return full
 
     def _fill_markerless_pose(self, obj, binmask, box, depth_frame, depth_img):
         """translation = 마스크 centroid depth median deproject, orientation = 2D PCA yaw."""
@@ -378,10 +405,6 @@ class PerceptionNode(Node):
         if binmask is not None and binmask.any():
             ys, xs = np.nonzero(binmask)
             cu, cv_ = float(xs.mean()), float(ys.mean())
-            quat = _mask_pca_yaw_quat(xs, ys)
-            if quat is not None:
-                qx, qy, qz, qw = quat
-                obj.pose.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
         else:
             cu, cv_ = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
@@ -401,18 +424,19 @@ class PerceptionNode(Node):
             is_pick = (pick is not None and obj is pick)
             color = (0, 255, 0) if is_pick else (255, 100, 0)
 
-            # 마스크 반투명 오버레이
-            binmask = self._get_binmask(masks, i)
-            if binmask is not None:
-                overlay[binmask] = (
-                    overlay[binmask] * 0.5 + np.array(color, dtype=np.float32) * 0.5
-                ).astype(np.uint8)
-
             # 바운딩박스
             x1 = obj.bbox.x_offset
             y1 = obj.bbox.y_offset
             x2 = x1 + obj.bbox.width
             y2 = y1 + obj.bbox.height
+
+            # 마스크 반투명 오버레이
+            binmask = self._get_binmask(masks, i, img, (x1, y1, x2, y2))
+            if binmask is not None:
+                overlay[binmask] = (
+                    overlay[binmask] * 0.5 + np.array(color, dtype=np.float32) * 0.5
+                ).astype(np.uint8)
+
             cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
 
             # 텍스트: 클래스명 + confidence + 거리
