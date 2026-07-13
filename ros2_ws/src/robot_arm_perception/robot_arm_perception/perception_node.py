@@ -142,7 +142,7 @@ class PerceptionNode(Node):
     def __init__(self):
         super().__init__('perception_node')
 
-        self.declare_parameter('model_path', 'yolov8n-seg.pt')  # seg 모델 필수
+        self.declare_parameter('model_path', 'src/robot_arm_perception/models/best.pt')  # Roboflow 커스텀 학습 모델 (2026-07-08)
         self.declare_parameter('backend', 'pt')          # 'pt' | 'trt'
         self.declare_parameter('conf_threshold', 0.4)
         self.declare_parameter('classes', '')            # 쉼표구분 필터, 빈값=전체
@@ -292,7 +292,7 @@ class PerceptionNode(Node):
                 obj.bbox = roi
 
                 # ② markerless pose: 마스크 기반 translation(depth) + orientation(2D PCA)
-                binmask = self._get_binmask(masks, i)
+                binmask = self._get_binmask(masks, i, color_img, (x1, y1, x2, y2))
                 self._fill_markerless_pose(
                     obj, binmask, (x1, y1, x2, y2), depth_frame, depth_img)
 
@@ -361,14 +361,41 @@ class PerceptionNode(Node):
                 best = obj
         return best
 
-    def _get_binmask(self, masks, i):
-        """i번째 객체의 이진 마스크(원본 해상도). seg 모델 아니면 None."""
-        if masks is None or i >= len(masks):
-            return None
-        m = masks[i]
-        if m.shape != (self._h, self._w):
-            m = cv2.resize(m, (self._w, self._h), interpolation=cv2.INTER_NEAREST)
-        return m > 0.5
+    def _get_binmask(self, masks, i, color_img=None, box=None):
+        """i번째 객체의 이진 마스크(원본 해상도).
+
+        seg 모델이면 YOLO 마스크 그대로 사용. detect 전용 모델(마스크 없음)이면
+        bbox 안 red/blue HSV 색상 마스크로 대체(대회 타겟 클래스 'red and blue box'
+        전용 근사) — PCA 주축 계산엔 정확한 세그멘테이션과 동일하게 넘길 수 있다.
+        """
+        if masks is not None and i < len(masks):
+            m = masks[i]
+            if m.shape != (self._h, self._w):
+                m = cv2.resize(m, (self._w, self._h), interpolation=cv2.INTER_NEAREST)
+            return m > 0.5
+        if color_img is not None and box is not None:
+            return self._color_mask_in_box(color_img, box)
+        return None
+
+    def _color_mask_in_box(self, color_img, box):
+        """bbox 내부에서 red/blue HSV 마스크 추출 → 전체 프레임 크기 bool 배열로 반환.
+
+        빨강은 HSV hue가 0 근처와 180 근처 양쪽에 걸쳐 있어 두 구간을 합친다.
+        """
+        x1, y1, x2, y2 = box
+        x1, y1 = max(x1, 0), max(y1, 0)
+        x2, y2 = min(x2, self._w), min(y2, self._h)
+        full = np.zeros((self._h, self._w), dtype=bool)
+        if x2 <= x1 or y2 <= y1:
+            return full
+        hsv = cv2.cvtColor(color_img[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+        red = (cv2.inRange(hsv, (0, 70, 50), (10, 255, 255))
+               | cv2.inRange(hsv, (170, 70, 50), (180, 255, 255)))
+        blue = cv2.inRange(hsv, (100, 70, 50), (130, 255, 255))
+        mask = cv2.morphologyEx(red | blue, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        full[y1:y2, x1:x2] = mask > 0
+        return full
 
     def _fill_markerless_pose(self, obj, binmask, box, depth_frame, depth_img):
         """translation = 마스크 centroid depth median deproject, orientation = 2D PCA yaw."""
@@ -401,26 +428,46 @@ class PerceptionNode(Node):
             is_pick = (pick is not None and obj is pick)
             color = (0, 255, 0) if is_pick else (255, 100, 0)
 
-            # 마스크 반투명 오버레이
-            binmask = self._get_binmask(masks, i)
-            if binmask is not None:
-                overlay[binmask] = (
-                    overlay[binmask] * 0.5 + np.array(color, dtype=np.float32) * 0.5
-                ).astype(np.uint8)
-
             # 바운딩박스
             x1 = obj.bbox.x_offset
             y1 = obj.bbox.y_offset
             x2 = x1 + obj.bbox.width
             y2 = y1 + obj.bbox.height
+
+            # 마스크 반투명 오버레이
+            binmask = self._get_binmask(masks, i, img, (x1, y1, x2, y2))
+            if binmask is not None:
+                overlay[binmask] = (
+                    overlay[binmask] * 0.5 + np.array(color, dtype=np.float32) * 0.5
+                ).astype(np.uint8)
+
             cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
 
-            # 텍스트: 클래스명 + confidence + 거리
+            # 텍스트: 클래스명 + confidence + 거리 + yaw(PCA)
             z = obj.pose.position.z
             depth_str = f' {z:.2f}m' if z != 0.0 else ''
-            label = f'{obj.class_name} {obj.confidence:.2f}{depth_str}'
+            q = obj.pose.orientation
+            has_yaw = not (q.x == 0.0 and q.y == 0.0 and q.z == 0.0 and q.w == 1.0)
+            yaw_str = ''
+            if has_yaw:
+                yaw_rad = 2.0 * math.atan2(q.z, q.w)
+                yaw_deg = math.degrees(yaw_rad)
+                yaw_str = f' yaw={yaw_deg:.0f}deg'
+            label = f'{obj.class_name} {obj.confidence:.2f}{depth_str}{yaw_str}'
             cv2.putText(overlay, label, (x1, max(y1 - 6, 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+            # PCA 주축 방향 시각화 (centroid에서 yaw 방향으로 선 긋기, ±180° 모호성 있어 양방향 표시)
+            if has_yaw and binmask is not None and binmask.any():
+                ys_m, xs_m = np.nonzero(binmask)
+                cu, cvv = float(xs_m.mean()), float(ys_m.mean())
+                length = 0.6 * max(x2 - x1, y2 - y1)
+                dx = length * math.cos(yaw_rad)
+                dy = length * math.sin(yaw_rad)
+                p1 = (int(cu - dx), int(cvv - dy))
+                p2 = (int(cu + dx), int(cvv + dy))
+                cv2.line(overlay, p1, p2, (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.circle(overlay, (int(cu), int(cvv)), 3, (0, 0, 255), -1)
         return overlay
 
     def _grab_frame(self):
