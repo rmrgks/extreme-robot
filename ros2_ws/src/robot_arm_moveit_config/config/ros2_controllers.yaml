@@ -6,15 +6,31 @@ controller_manager:
     arm_controller:
       type: joint_trajectory_controller/JointTrajectoryController
 
+    gripper_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
 arm_controller:
   ros__parameters:
     joints:
-      - joint_1
-      - joint_2
-      - joint_3
+      - Revolute 23
+      - Revolute 29
+      - Revolute 42
+      - Revolute 48
+      - Revolute 72
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+
+gripper_controller:
+  ros__parameters:
+    joints:
+      - gripper_a_joint5
+      - gripper_a_joint6
     command_interfaces:
       - position
     state_interfaces:

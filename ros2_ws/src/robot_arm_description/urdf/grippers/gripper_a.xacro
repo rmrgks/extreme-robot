@@ -362,35 +362,45 @@
 </link>
 
 
-<joint name="gripper_a_joint5" type="continuous">
+<!-- 실측 기구 개폐range/방향 미확정 placeholder, 사용자 수동 캘리브레이션 진행 중.
+     mimic(joint5<->joint6) 임시 해제 — 두 핑거 각도가 대칭이 아니라 -1 배율로는 안 맞음, 개별 지시로 재조정 예정.
+     range는 우선 넉넉하게(±1.5708rad=±90도) 잡아둠. -->
+<joint name="gripper_a_joint5" type="revolute">
   <origin xyz="0.01335 0.01805 0.036" rpy="0 0 0" />
   <parent link="gripper_a_top_plate" />
   <child link="gripper_a_link1" />
   <axis xyz="-0.0 0.0 -1.0" />
+  <limit lower="-1.5708" upper="1.5708" effort="5" velocity="1.0" />
 </joint>
 
 
-<joint name="gripper_a_joint6" type="continuous">
+<joint name="gripper_a_joint6" type="revolute">
   <origin xyz="0.01335 -0.01805 0.036" rpy="0 0 0" />
   <parent link="gripper_a_top_plate" />
   <child link="gripper_a_link3" />
   <axis xyz="-0.0 0.0 -1.0" />
+  <limit lower="-1.5708" upper="1.5708" effort="5" velocity="1.0" />
 </joint>
 
 
+<!-- link2는 평행4절링크의 두번째 크랭크 — link1(joint5)과 top_plate 기준 같은 각도로 돌아야 평행 유지됨.
+     루프 단순화로 독립 관절이 되며 구동과 무관하게 정지해 있던 것을 mimic으로 복원(같은 축·동일 부호). -->
 <joint name="gripper_a_joint7" type="continuous">
   <origin xyz="0.038228 0.008 0.036" rpy="0 0 0" />
   <parent link="gripper_a_top_plate" />
   <child link="gripper_a_link2" />
   <axis xyz="-0.0 0.0 -1.0" />
+  <mimic joint="gripper_a_joint5" multiplier="1" offset="0" />
 </joint>
 
 
+<!-- link4 = link2와 대칭인 반대쪽 평행4절링크 크랭크, link3(joint6)를 따라감. -->
 <joint name="gripper_a_joint8" type="continuous">
   <origin xyz="0.038228 -0.008 0.036" rpy="0 0 0" />
   <parent link="gripper_a_top_plate" />
   <child link="gripper_a_link4" />
   <axis xyz="-0.0 0.0 -1.0" />
+  <mimic joint="gripper_a_joint6" multiplier="1" offset="0" />
 </joint>
 
 
@@ -456,11 +466,14 @@
 </joint>
 
 
+<!-- 24T(모터) - 36T(joint5측 gripper_a_link1) 직결 치합 기어비 24:36 = 2:3 → 모터가 그리퍼(joint5)의
+     2/3만큼 회전. 외접기어 치합이라 joint5/joint23 axis가 둘 다 base_link 기준 동일 -Z라 부호는 반대. -->
 <joint name="gripper_a_joint23" type="continuous">
   <origin xyz="0.0 0.0 0.01" rpy="0 0 0" />
   <parent link="gripper_a_motor_adapter" />
   <child link="gripper_a_Spur_Gear_24_teeth__2__1" />
   <axis xyz="0.0 -0.0 -1.0" />
+  <mimic joint="gripper_a_joint5" multiplier="-0.66667" offset="0" />
 </joint>
 
 

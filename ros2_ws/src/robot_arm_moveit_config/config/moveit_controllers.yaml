@@ -5,12 +5,23 @@ moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControll
 moveit_simple_controller_manager:
   controller_names:
     - arm_controller
+    - gripper_controller
 
   arm_controller:
     type: FollowJointTrajectory
     action_ns: follow_joint_trajectory
     default: true
     joints:
-      - joint_1
-      - joint_2
-      - joint_3
+      - Revolute 23
+      - Revolute 29
+      - Revolute 42
+      - Revolute 48
+      - Revolute 72
+
+  gripper_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - gripper_a_joint5
+      - gripper_a_joint6
