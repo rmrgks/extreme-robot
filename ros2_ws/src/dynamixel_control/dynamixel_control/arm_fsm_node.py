@@ -46,6 +46,7 @@ from moveit_msgs.msg import (MotionPlanRequest, Constraints, PositionConstraint,
 from moveit_msgs.srv import GetPositionFK
 from shape_msgs.msg import SolidPrimitive
 from robot_arm_msgs.msg import ArrivalStatus, ChassisMode, ArmStatus, DetectedObject
+from dynamixel_control.gripper_presets import DEFAULT_GRIPPER, get_preset
 
 
 # ⚠️ URDF/SRDF가 아직 팔 5축 중 3축(joint_1~3)만 반영(WIP, CAD 미완성) — MoveIt의
@@ -118,18 +119,23 @@ class ArmFsmNode(Node):
         self.declare_parameter('ik_tol', 0.01)          # [m] 위치 수렴 허용오차
         self.declare_parameter('ik_accept_tol', 0.03)   # [m] 최종 실패 판정 기준
         self.declare_parameter('arm_move_speed', 0.5)   # [rad/s] 직접명령 시 소요시간 추정용
-        # 그리퍼 (prismatic finger, 단위 m — 실측 캘리브 필요)
-        self.declare_parameter('gripper_joints', ['left_finger_joint', 'right_finger_joint'])
-        self.declare_parameter('gripper_open', 0.02)
-        self.declare_parameter('gripper_close', 0.0)
+        # 그리퍼 — gripper_type 이 gripper_presets.GRIPPER_PRESETS 의 기본값을 고르고,
+        # 아래 개별 파라미터는 필요 시 CLI/런치로 여전히 개별 오버라이드 가능.
+        self.declare_parameter('gripper_type', DEFAULT_GRIPPER)
+        gripper_type = self.get_parameter('gripper_type').value
+        gpreset = get_preset(gripper_type, self.get_logger())
+
+        self.declare_parameter('gripper_joints', gpreset['gripper_joints'])
+        self.declare_parameter('gripper_open', gpreset['gripper_open_m'])
+        self.declare_parameter('gripper_close', gpreset['gripper_close_m'])
         # 전류(effort) 임계 — moveit_dynamixel_bridge 가 /joint_states.effort 에
-        # raw signed PRESENT_CURRENT(XL430 기준 1단위≈2.69mA)를 발행. 아래는 placeholder,
+        # raw signed PRESENT_CURRENT(XL430 기준 1단위≈2.69mA)를 발행. preset 값은 placeholder,
         # 실측 캘리브 필요(TODO): 무부하 파지 전류/낙하 시 전류를 측정해 임계값 설정.
-        self.declare_parameter('grasp_effort_thresh', 80.0)   # ≈215mA, placeholder
-        self.declare_parameter('drop_effort_thresh', 20.0)    # ≈54mA, placeholder
+        self.declare_parameter('grasp_effort_thresh', gpreset['grasp_effort_thresh'])
+        self.declare_parameter('drop_effort_thresh', gpreset['drop_effort_thresh'])
         # 동작 제어
         self.declare_parameter('max_regrasp', 3)
-        self.declare_parameter('gripper_action_time', 1.0)       # 그리퍼 동작 시간 [s]
+        self.declare_parameter('gripper_action_time', gpreset['gripper_action_time'])  # [s]
         self.declare_parameter('tick_rate', 10.0)
 
         g = self.get_parameter
@@ -148,6 +154,7 @@ class ArmFsmNode(Node):
         self.ik_tol = g('ik_tol').value
         self.ik_accept_tol = g('ik_accept_tol').value
         self.arm_move_speed = g('arm_move_speed').value
+        self.gripper_type = gripper_type
         self.gripper_joints = list(g('gripper_joints').value)
         self.gripper_open = g('gripper_open').value
         self.gripper_close = g('gripper_close').value
@@ -202,7 +209,9 @@ class ArmFsmNode(Node):
 
         period = 1.0 / g('tick_rate').value
         self.create_timer(period, self._tick)
-        self.get_logger().info('arm_fsm_node started (MoveIt 경로, state=IDLE)')
+        self.get_logger().info(
+            f'arm_fsm_node started (MoveIt 경로, state=IDLE, gripper_type={self.gripper_type})'
+        )
 
     # ── 콜백 ───────────────────────────────────
 

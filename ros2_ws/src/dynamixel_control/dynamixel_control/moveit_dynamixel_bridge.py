@@ -10,6 +10,8 @@ from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite, GroupSyncRead
 
+from dynamixel_control.gripper_presets import DEFAULT_GRIPPER, get_preset
+
 
 ADDR_TORQUE_ENABLE = 64
 ADDR_GOAL_POSITION = 116
@@ -60,13 +62,19 @@ class MoveItDynamixelBridge(Node):
     def __init__(self):
         super().__init__("moveit_dynamixel_bridge")
 
-        # --- 그리퍼 파라미터 (단일 서보 양 핑거 미러링; 실하드웨어 확정 후 런치/CLI로 조정) ---
-        self.declare_parameter("gripper_joints", ["left_finger_joint", "right_finger_joint"])
-        self.declare_parameter("gripper_ids", [5])          # 미정 → 기본 1개. 빈 배열이면 그리퍼 비활성
-        self.declare_parameter("gripper_open_m", 0.02)      # prismatic 핑거 열림 [m]
-        self.declare_parameter("gripper_close_m", 0.0)      # 닫힘 [m]
-        self.declare_parameter("gripper_open_tick", 2400)   # placeholder — 실측 캘리브 필요
-        self.declare_parameter("gripper_close_tick", 2048)  # placeholder — 실측 캘리브 필요
+        # --- 그리퍼 파라미터 (단일 서보 양 핑거 미러링) ---
+        # gripper_type 이 gripper_presets.GRIPPER_PRESETS 의 기본값을 고르고,
+        # 아래 개별 파라미터는 필요 시 CLI/런치로 여전히 개별 오버라이드 가능.
+        self.declare_parameter("gripper_type", DEFAULT_GRIPPER)
+        self.gripper_type = self.get_parameter("gripper_type").value
+        preset = get_preset(self.gripper_type, self.get_logger())
+
+        self.declare_parameter("gripper_joints", preset["gripper_joints"])
+        self.declare_parameter("gripper_ids", preset["gripper_ids"])  # 빈 배열이면 그리퍼 비활성
+        self.declare_parameter("gripper_open_m", preset["gripper_open_m"])
+        self.declare_parameter("gripper_close_m", preset["gripper_close_m"])
+        self.declare_parameter("gripper_open_tick", preset["gripper_open_tick"])
+        self.declare_parameter("gripper_close_tick", preset["gripper_close_tick"])
 
         self.gripper_joints = list(self.get_parameter("gripper_joints").value)
         self.gripper_ids = list(self.get_parameter("gripper_ids").value)
@@ -145,7 +153,7 @@ class MoveItDynamixelBridge(Node):
 
         self.get_logger().info(
             f"MoveIt Dynamixel bridge started (arm={list(JOINT_CONFIG)}, "
-            f"gripper_ids={self.gripper_ids})"
+            f"gripper_type={self.gripper_type}, gripper_ids={self.gripper_ids})"
         )
 
     # ------------------------------------------------------------------ helpers
