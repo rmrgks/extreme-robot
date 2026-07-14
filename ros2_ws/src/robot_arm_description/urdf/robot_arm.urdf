@@ -4,52 +4,52 @@
   <material name="silver">
     <color rgba="0.700 0.700 0.700 1.000"/>
   </material>
-  <transmission name="Revolute 23_tran">
+  <transmission name="joint_1_tran">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Revolute 23">
+    <joint name="joint_1">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
     </joint>
-    <actuator name="Revolute 23_actr">
+    <actuator name="joint_1_actr">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
   </transmission>
-  <transmission name="Revolute 29_tran">
+  <transmission name="joint_2_tran">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Revolute 29">
+    <joint name="joint_2">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
     </joint>
-    <actuator name="Revolute 29_actr">
+    <actuator name="joint_2_actr">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
   </transmission>
-  <transmission name="Revolute 42_tran">
+  <transmission name="joint_3_tran">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Revolute 42">
+    <joint name="joint_3">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
     </joint>
-    <actuator name="Revolute 42_actr">
+    <actuator name="joint_3_actr">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
   </transmission>
-  <transmission name="Revolute 48_tran">
+  <transmission name="joint_4_tran">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Revolute 48">
+    <joint name="joint_4">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
     </joint>
-    <actuator name="Revolute 48_actr">
+    <actuator name="joint_4_actr">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
   </transmission>
-  <transmission name="Revolute 72_tran">
+  <transmission name="joint_5_tran">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Revolute 72">
+    <joint name="joint_5">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
     </joint>
-    <actuator name="Revolute 72_actr">
+    <actuator name="joint_5_actr">
       <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
@@ -1139,11 +1139,12 @@
     <parent link="lower_cylinder_1"/>
     <child link="powertrain_1"/>
   </joint>
-  <joint name="Revolute 23" type="continuous">
+  <joint name="joint_1" type="revolute">
     <origin xyz="0.0 0.0 0.0465" rpy="0 0 0"/>
     <parent link="lower_cylinder_1"/>
     <child link="base_plate_1"/>
     <axis xyz="0.0 0.0 1.0"/>
+    <limit upper="3.141593" lower="-3.141593" effort="100" velocity="100"/>
   </joint>
   <joint name="Rigid 24" type="fixed">
     <origin xyz="0.0 -0.01 0.0085" rpy="0 0 0"/>
@@ -1170,7 +1171,7 @@
     <parent link="adapter_a_1"/>
     <child link="motor_1"/>
   </joint>
-  <joint name="Revolute 29" type="revolute">
+  <joint name="joint_2" type="revolute">
     <origin xyz="0.0465 0.0 0.0" rpy="0 0 0"/>
     <parent link="motor_1"/>
     <child link="adapter_b_1"/>
@@ -1232,7 +1233,7 @@
     <parent link="adapter_a__1__1"/>
     <child link="gearbox1__1__1"/>
   </joint>
-  <joint name="Revolute 42" type="revolute">
+  <joint name="joint_3" type="revolute">
     <origin xyz="-0.0755 0.0 0.0" rpy="0 0 0"/>
     <parent link="gearbox1__1__1"/>
     <child link="cap2_1"/>
@@ -1264,7 +1265,7 @@
     <parent link="link4_1"/>
     <child link="link5_1"/>
   </joint>
-  <joint name="Revolute 48" type="revolute">
+  <joint name="joint_4" type="revolute">
     <origin xyz="0.0001 -0.068917 0.0045" rpy="0 0 0"/>
     <parent link="link5_1"/>
     <child link="adapter_1"/>
@@ -1321,11 +1322,12 @@
     <parent link="link2__1__1"/>
     <child link="XL430_T_1"/>
   </joint>
-  <joint name="Revolute 72" type="continuous">
+  <joint name="joint_5" type="revolute">
     <origin xyz="0.0309 0.001644 -0.00525" rpy="0 0 0"/>
     <parent link="XL430_T_1"/>
     <child link="connector_1__1"/>
     <axis xyz="-0.0 -1.0 0.0"/>
+    <limit upper="3.141593" lower="-3.141593" effort="100" velocity="100"/>
   </joint>
   <joint name="Rigid 73" type="fixed">
     <origin xyz="0.0 -0.0051 0.0" rpy="0 0 0"/>
