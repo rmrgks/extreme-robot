@@ -6,37 +6,32 @@ default_velocity_scaling_factor: 0.1
 default_acceleration_scaling_factor: 0.1
 
 joint_limits:
-  Revolute 23:
+  arm_joint_1:
     has_velocity_limits: true
     max_velocity: 1.0
     has_acceleration_limits: false
     max_acceleration: 0
-  Revolute 29:
+  arm_joint_2:
     has_velocity_limits: true
     max_velocity: 1.0
     has_acceleration_limits: false
     max_acceleration: 0
-  Revolute 42:
+  arm_joint_3:
     has_velocity_limits: true
     max_velocity: 1.0
     has_acceleration_limits: false
     max_acceleration: 0
-  Revolute 48:
+  arm_joint_4:
     has_velocity_limits: true
     max_velocity: 1.0
     has_acceleration_limits: false
     max_acceleration: 0
-  Revolute 72:
+  arm_joint_5:
     has_velocity_limits: true
     max_velocity: 1.0
     has_acceleration_limits: false
     max_acceleration: 0
-  gripper_a_joint5:
-    has_velocity_limits: true
-    max_velocity: 1.0
-    has_acceleration_limits: false
-    max_acceleration: 0
-  gripper_a_joint6:
+  gripper_drive_joint:
     has_velocity_limits: true
     max_velocity: 1.0
     has_acceleration_limits: false

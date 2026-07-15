@@ -1,12 +1,9 @@
 # Default initial positions for robot_arm's ros2_control fake system.
-# all-zero는 팔이 접혀 자기충돌하는 자세라 SRDF의 "home" group_state와 동일하게 mid-range로 맞춤
-# (robot_arm.srdf 주석 참고).
-
+# all-zero(=CAD assembly 기준 자세)가 실측 결합 정상 확인된 pose — SRDF "home" group_state와 동일.
 initial_positions:
-  Revolute 23: 0
-  Revolute 29: -1.5708
-  Revolute 42: 1.5708
-  Revolute 48: 0
-  Revolute 72: 0
-  gripper_a_joint5: 0
-  gripper_a_joint6: 0
+  arm_joint_1: 0
+  arm_joint_2: 0
+  arm_joint_3: 0
+  arm_joint_4: 0
+  arm_joint_5: 0
+  gripper_drive_joint: 0

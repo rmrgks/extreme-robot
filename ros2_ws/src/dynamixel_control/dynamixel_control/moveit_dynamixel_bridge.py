@@ -42,11 +42,13 @@ DXL_CENTER_POSITION = 2048
 TICKS_PER_RAD = 4096.0 / (2.0 * math.pi)
 
 
-# 팔 관절 ↔ 다이나믹셀 ID 매핑. (현재 3개만 — 팔 DOF 확정 시 joint_4~ 추가, CLAUDE.md §8)
+# 팔 관절 ↔ 다이나믹셀 ID 매핑. (현재 3개만 — 팔 DOF 확정 시 arm_joint_4~ 추가, CLAUDE.md §8)
+# 조인트 이름은 2026-07-15 Isaac Sim 기반 재export(robotarm_urdf_20260711.urdf) 기준
+# (arm_joint_1~5) — 기존 fusion2urdf 계열(joint_1~5)에서 갈아탐.
 JOINT_CONFIG = {
-    "joint_1": {"id": 0, "center": 2048, "direction": 1},
-    "joint_2": {"id": 1, "center": 2048, "direction": 1},
-    "joint_3": {"id": 2, "center": 2048, "direction": 1},
+    "arm_joint_1": {"id": 0, "center": 2048, "direction": 1},
+    "arm_joint_2": {"id": 1, "center": 2048, "direction": 1},
+    "arm_joint_3": {"id": 2, "center": 2048, "direction": 1},
 }
 
 
@@ -277,7 +279,7 @@ class MoveItDynamixelBridge(Node):
         if trajectory.points:
             point = trajectory.points[-1]
             name_to_pos = dict(zip(trajectory.joint_names, point.positions))
-            # 단일 서보 미러링: 대표 핑거 관절 위치 하나만 사용
+            # 단일 구동 조인트(gripper_drive_joint)만 사용 — 나머지 8개는 URDF mimic으로 종속
             target_m = None
             for jn in self.gripper_joints:
                 if jn in name_to_pos:

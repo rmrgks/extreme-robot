@@ -49,13 +49,13 @@ from robot_arm_msgs.msg import ArrivalStatus, ChassisMode, ArmStatus, DetectedOb
 from dynamixel_control.gripper_presets import DEFAULT_GRIPPER, get_preset
 
 
-# ⚠️ URDF/SRDF가 아직 팔 5축 중 3축(joint_1~3)만 반영(WIP, CAD 미완성) — MoveIt의
-# 6DOF pose goal(position+orientation)은 이 3관절로 일반적으로 풀리지 않음(HW-7 실측
-# 확인: /compute_ik가 현재 실제 tip pose에도 NO_IK_SOLUTION 반환). URDF가 5축으로
-# 확장되기 전까지는 'analytic' 모드(FK+수치 자코비안으로 위치만 맞추는 3DOF IK, 방향
-# 무시)를 기본으로 쓰고, MoveGroup 경로(§6 결정 '가')는 남겨두되 ik_mode:='moveit'로
+# 2026-07-15 Isaac Sim 기반 재export(robotarm_urdf_20260711.urdf) 기준 — URDF 자체는
+# 팔 5축(arm_joint_1~5)을 전부 반영하지만, analytic IK(FK+수치 자코비안)는 아직 앞의
+# 3관절만 풀도록 남겨둠(HW-7 당시 6DOF pose goal이 NO_IK_SOLUTION이던 문제 회피용으로
+# 도입된 3DOF 위치전용 IK — URDF가 3축만 있어서가 아니라 solver를 아직 5DOF로 확장 안
+# 해서임, 방향은 여전히 무시). MoveGroup 경로(§6 결정 '가')는 남겨두되 ik_mode:='moveit'로
 # 전환 가능하게만 유지.
-ARM_JOINT_NAMES = ['joint_1', 'joint_2', 'joint_3']
+ARM_JOINT_NAMES = ['arm_joint_1', 'arm_joint_2', 'arm_joint_3']
 
 
 # ──────────────────────────────────────────────
@@ -101,10 +101,10 @@ class ArmFsmNode(Node):
         # ── 파라미터 ──────────────────────────────
         # MoveIt
         self.declare_parameter('planning_group', 'arm')          # SRDF group
-        # ⚠️ URDF 미완성(WIP) 현재 tip: Link4_1_1 (실물 CAD 3관절만 반영, joint_4/5 축 아직
-        # URDF 미통합 — 실하드웨어는 1~5축 서보 5개 + 그리퍼 서보 1개 총 6개 존재).
-        # URDF가 5축 전체로 확장되면 이 기본값과 SRDF arm 그룹을 함께 갱신할 것.
-        self.declare_parameter('tip_link', 'Link4_1_1')          # 그리퍼 부모 링크
+        # tip_link: arm_joint_5 이후 고정 조인트 체인의 마지막 링크(link_051) — 여기서
+        # gripper_drive_joint(구동)와 gripper_linkage_base_fixed(그리퍼 고정 베이스)가 갈라짐.
+        # 2026-07-15 Isaac Sim 재export(robotarm_urdf_20260711.urdf) 기준.
+        self.declare_parameter('tip_link', 'link_051')            # 그리퍼 부모 링크
         self.declare_parameter('base_frame', 'base_link')        # planning frame (리프트 기준)
         self.declare_parameter('lift_height', 0.10)              # LIFT 시 base_link +Z [m]
         self.declare_parameter('pick_frame_id', 'camera_color_optical_frame')
@@ -536,9 +536,10 @@ class ArmFsmNode(Node):
     def _solve_position_ik(self, target_xyz, q_init):
         """FK + 수치 자코비안(finite-difference) 로 위치만 맞추는 3DOF IK.
 
-        URDF가 joint_1~3만 반영해 MoveIt 6DOF pose IK가 원천 불가(HW-7 실측 확인,
-        compute_ik가 현재 실제 tip pose에도 NO_IK_SOLUTION). 방향은 포기하고 위치만
-        댐핑 최소자승(Levenberg-Marquardt 유사)으로 반복 수렴.
+        ARM_JOINT_NAMES가 앞 3관절(arm_joint_1~3)만 써서 MoveIt 6DOF pose IK 대신 이 방식을
+        기본으로 씀(HW-7 실측 확인, compute_ik가 현재 실제 tip pose에도 NO_IK_SOLUTION 반환하던
+        문제 회피 — URDF 자체는 5축 다 있음, solver가 아직 5DOF로 확장 안 됨). 방향은 포기하고
+        위치만 댐핑 최소자승(Levenberg-Marquardt 유사)으로 반복 수렴.
         """
         q = np.array(q_init, dtype=float)
         target = np.array(target_xyz, dtype=float)

@@ -15,11 +15,11 @@ controller_manager:
 arm_controller:
   ros__parameters:
     joints:
-      - Revolute 23
-      - Revolute 29
-      - Revolute 42
-      - Revolute 48
-      - Revolute 72
+      - arm_joint_1
+      - arm_joint_2
+      - arm_joint_3
+      - arm_joint_4
+      - arm_joint_5
     command_interfaces:
       - position
     state_interfaces:
@@ -29,8 +29,7 @@ arm_controller:
 gripper_controller:
   ros__parameters:
     joints:
-      - gripper_a_joint5
-      - gripper_a_joint6
+      - gripper_drive_joint
     command_interfaces:
       - position
     state_interfaces:

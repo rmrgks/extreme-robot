@@ -8,52 +8,45 @@
                 <!-- By default, set up controllers for simulation. This won't work on real hardware -->
                 <plugin>mock_components/GenericSystem</plugin>
             </hardware>
-            <joint name="Revolute 23">
+            <joint name="arm_joint_1">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                  <param name="initial_value">${initial_positions['Revolute 23']}</param>
+                  <param name="initial_value">${initial_positions['arm_joint_1']}</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
-            <joint name="Revolute 29">
+            <joint name="arm_joint_2">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                  <param name="initial_value">${initial_positions['Revolute 29']}</param>
+                  <param name="initial_value">${initial_positions['arm_joint_2']}</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
-            <joint name="Revolute 42">
+            <joint name="arm_joint_3">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                  <param name="initial_value">${initial_positions['Revolute 42']}</param>
+                  <param name="initial_value">${initial_positions['arm_joint_3']}</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
-            <joint name="Revolute 48">
+            <joint name="arm_joint_4">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                  <param name="initial_value">${initial_positions['Revolute 48']}</param>
+                  <param name="initial_value">${initial_positions['arm_joint_4']}</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
-            <joint name="Revolute 72">
+            <joint name="arm_joint_5">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                  <param name="initial_value">${initial_positions['Revolute 72']}</param>
+                  <param name="initial_value">${initial_positions['arm_joint_5']}</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
-            <joint name="gripper_a_joint5">
+            <joint name="gripper_drive_joint">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                  <param name="initial_value">${initial_positions['gripper_a_joint5']}</param>
-                </state_interface>
-                <state_interface name="velocity"/>
-            </joint>
-            <joint name="gripper_a_joint6">
-                <command_interface name="position"/>
-                <state_interface name="position">
-                  <param name="initial_value">${initial_positions['gripper_a_joint6']}</param>
+                  <param name="initial_value">${initial_positions['gripper_drive_joint']}</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>

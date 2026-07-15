@@ -4,129 +4,95 @@
     A URDF file must exist for this robot as well, where the joints and the links that are referenced are defined
 -->
 <robot name="robot_arm">
-    <!-- 2026-07-07 CAD export(5축) 기준 재작성. base_link -> module_connector_5axis_Component41_1 체인(Revolute 23/29/42/48/72),
-         그리퍼는 robot_arm.urdf.xacro의 wrist_to_gripper로 결합된 gripper_a. gripper_a_joint5/6(top_plate->link1/link3)만
-         top_plate에 직접 매달린 실제 개폐 구동 관절이고, joint7~23은 평행링크/기어 표현용 미구동 관절(모델에 mimic 미반영,
-         urdf/grippers/gripper_a.xacro 주석 참고) -->
+    <!-- 2026-07-15 Isaac Sim 기반 재export(robotarm_urdf_20260711.urdf)로 robot_arm.urdf 전면 교체
+         (RViz에서 joint_2/3 축이 계속 이상해 기존 Fusion360/VerNOmiddle 계열을 폐기 — robot_arm.urdf
+         헤더 주석 참고). base_link -> link_051 체인(arm_joint_1~5). 그리퍼는 실제 구동 조인트
+         gripper_drive_joint 하나만 있고 나머지 8개(크랭크/조 관절)는 URDF <mimic> 태그로 자동
+         종속되는 평행 4절링크 — 예전 gripper_a_joint5/6(두 관절을 동일 값으로 미러링)에서 갈아탐. -->
     <group name="arm">
-        <chain base_link="base_link" tip_link="module_connector_5axis_Component41_1"/>
+        <chain base_link="base_link" tip_link="link_051"/>
     </group>
     <group name="gripper">
-        <joint name="gripper_a_joint5"/>
-        <joint name="gripper_a_joint6"/>
+        <joint name="gripper_drive_joint"/>
     </group>
-    <!-- all-zero는 CAD assembly 기준 자세일 뿐 실제 로봇 home으로는 부적합 — Revolute 29(-pi~0)·42(0~pi) 둘 다
-         구간 경계값이라 all-zero에서는 팔이 접혀 몸체와 자기충돌함. mid-range(-pi/2, pi/2)로 편 자세를 home으로 사용. -->
     <group_state name="home" group="arm">
-        <joint name="Revolute 23" value="0"/>
-        <joint name="Revolute 29" value="-1.5708"/>
-        <joint name="Revolute 42" value="1.5708"/>
-        <joint name="Revolute 48" value="0"/>
-        <joint name="Revolute 72" value="0"/>
+        <joint name="arm_joint_1" value="0"/>
+        <joint name="arm_joint_2" value="0"/>
+        <joint name="arm_joint_3" value="0"/>
+        <joint name="arm_joint_4" value="0"/>
+        <joint name="arm_joint_5" value="0"/>
     </group_state>
-    <!-- joint5/6 mimic 임시 해제, 개별 캘리브레이션 진행 중 — 값은 사용자 수동 지시로 재조정 예정, 우선 0으로 둠. -->
+    <!-- 캘리브레이션 전이라 우선 0/0 placeholder — 실측 후 open/closed 값 재조정 필요. -->
     <group_state name="gripper_open" group="gripper">
-        <joint name="gripper_a_joint5" value="0"/>
-        <joint name="gripper_a_joint6" value="0"/>
+        <joint name="gripper_drive_joint" value="0"/>
     </group_state>
     <group_state name="gripper_closed" group="gripper">
-        <joint name="gripper_a_joint5" value="0"/>
-        <joint name="gripper_a_joint6" value="0"/>
+        <joint name="gripper_drive_joint" value="0"/>
     </group_state>
-    <end_effector name="gripper_a" parent_link="module_connector_5axis_Component41_1" group="gripper" parent_group="arm"/>
+    <end_effector name="gripper_a" parent_link="link_051" group="gripper" parent_group="arm"/>
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>
-    <!-- 아래 disable_collisions는 URDF의 모든 joint(fixed 포함)로부터 자동 도출한 "Adjacent"(부모-자식) 쌍(reason="Adjacent")과,
-         home 자세에서 실측 충돌 체크로 찾아낸 뒤 두 링크 사이 경로가 가동 관절(revolute/continuous)을 하나도 거치지 않음을
-         (상대 위치가 자세에 무관하게 고정됨을) 확인한 쌍(reason="Default")만 포함. 가동 관절을 거치는 접촉쌍은 자세 의존적이라
-         일괄 disable하지 않음 — MoveIt Setup Assistant GUI의 통계적 Default/Never 샘플링을 거치지 않았으므로, 위 두 카테고리에
-         들지 않는 실제 항상-접촉 쌍이 남아있을 수 있음(추후 GUI "Regenerate Default Collision Matrix" 재실행 권장). -->
-    <disable_collisions link1="Component40_1" link2="link2_1" reason="Adjacent"/>
-    <disable_collisions link1="Component40_1" link2="link2_leg_1" reason="Adjacent"/>
-    <disable_collisions link1="XL430_T_1" link2="connector_1__1" reason="Adjacent"/>
-    <disable_collisions link1="adapter_1" link2="link2__1__1" reason="Adjacent"/>
-    <disable_collisions link1="adapter_1" link2="motor2_1" reason="Adjacent"/>
-    <disable_collisions link1="adapter_a_1" link2="motor_1" reason="Adjacent"/>
-    <disable_collisions link1="adapter_a__1__1" link2="gearbox1__1__1" reason="Adjacent"/>
-    <disable_collisions link1="adapter_b_1" link2="Component40_1" reason="Adjacent"/>
-    <disable_collisions link1="adapter_b__1__1" link2="motor1_1" reason="Adjacent"/>
-    <disable_collisions link1="base_link" link2="lower_cylinder_1" reason="Adjacent"/>
-    <disable_collisions link1="base_link" link2="motor0_1" reason="Adjacent"/>
-    <disable_collisions link1="base_plate_1" link2="link1-1_1" reason="Adjacent"/>
-    <disable_collisions link1="base_plate_1" link2="link1_1" reason="Adjacent"/>
-    <disable_collisions link1="cap2_1" link2="link3_1" reason="Adjacent"/>
-    <disable_collisions link1="connector_1__1" link2="module_connector_5axis_Component41_1" reason="Adjacent"/>
-    <disable_collisions link1="gearbox1_1" link2="adapter_a_1" reason="Adjacent"/>
-    <disable_collisions link1="gearbox1__1__1" link2="cap2_1" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_base_link" link2="gripper_a_motor_adapter" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_base_link" link2="gripper_a_top_plate" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_link1" link2="gripper_a_Spur_Gear_36_teeth_1" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_link1" link2="gripper_a_link5" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_link1" link2="gripper_a_link5_2" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_link3" link2="gripper_a_Spur_Gear_36_teeth__1__1" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_link3" link2="gripper_a_component53_1" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_link3" link2="gripper_a_link6" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_link5" link2="gripper_a_plate2" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_link6" link2="gripper_a_plate1" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_motor_adapter" link2="gripper_a_Spur_Gear_24_teeth__2__1" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_top_plate" link2="gripper_a_link1" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_top_plate" link2="gripper_a_link2" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_top_plate" link2="gripper_a_link3" reason="Adjacent"/>
-    <disable_collisions link1="gripper_a_top_plate" link2="gripper_a_link4" reason="Adjacent"/>
-    <disable_collisions link1="link1-1_1" link2="gearbox1_1" reason="Adjacent"/>
-    <disable_collisions link1="link2-1__3__1" link2="cap_1" reason="Adjacent"/>
-    <disable_collisions link1="link2_1" link2="adapter_b__1__1" reason="Adjacent"/>
-    <disable_collisions link1="link2_1" link2="link2_leg2_1" reason="Adjacent"/>
-    <disable_collisions link1="link2__1__1" link2="XL430_T_1" reason="Adjacent"/>
-    <disable_collisions link1="link2__1__1" link2="bottom_1" reason="Adjacent"/>
-    <disable_collisions link1="link2__1__1" link2="top_1" reason="Adjacent"/>
-    <disable_collisions link1="link2_leg_1" link2="Component38_1" reason="Adjacent"/>
-    <disable_collisions link1="link2_leg_1" link2="link2-1__3__1" reason="Adjacent"/>
-    <disable_collisions link1="link3-1_1" link2="link4-1_1" reason="Adjacent"/>
-    <disable_collisions link1="link3_1" link2="link3_leg2_1" reason="Adjacent"/>
-    <disable_collisions link1="link3_1" link2="link3_leg_1" reason="Adjacent"/>
-    <disable_collisions link1="link3_1" link2="link4_1" reason="Adjacent"/>
-    <disable_collisions link1="link3_leg_1" link2="link3-1_1" reason="Adjacent"/>
-    <disable_collisions link1="link4-1_1" link2="link5-1_1" reason="Adjacent"/>
-    <disable_collisions link1="link4_1" link2="link5_1" reason="Adjacent"/>
-    <disable_collisions link1="link5-1_1" link2="adapter_b__1___1__1" reason="Adjacent"/>
-    <disable_collisions link1="link5_1" link2="adapter_1" reason="Adjacent"/>
-    <disable_collisions link1="lower_cylinder_1" link2="base_plate_1" reason="Adjacent"/>
-    <disable_collisions link1="lower_cylinder_1" link2="powertrain_1" reason="Adjacent"/>
-    <disable_collisions link1="module_connector_5axis_Component41_1" link2="gripper_a_base_link" reason="Adjacent"/>
-    <disable_collisions link1="motor1_1" link2="adapter_a__1__1" reason="Adjacent"/>
-    <disable_collisions link1="motor_1" link2="adapter_b_1" reason="Adjacent"/>
-    <disable_collisions link1="top_1" link2="link1__1__1" reason="Adjacent"/>
-    <disable_collisions link1="motor_1" link2="link1_1" reason="Default"/>
-    <disable_collisions link1="bottom_1" link2="top_1" reason="Default"/>
-    <disable_collisions link1="bottom_1" link2="link1__1__1" reason="Default"/>
-    <disable_collisions link1="XL430_T_1" link2="bottom_1" reason="Default"/>
-    <disable_collisions link1="XL430_T_1" link2="top_1" reason="Default"/>
-    <disable_collisions link1="Component38_1" link2="gearbox1__1__1" reason="Default"/>
-    <disable_collisions link1="link2_leg2_1" link2="Component38_1" reason="Default"/>
-    <disable_collisions link1="link2_leg_1" link2="link2_1" reason="Default"/>
-    <!-- 아래는 Revolute 48(link5_1->adapter_1) 관절을 사이에 두고 반대편에 있는 쌍(자세에 따라 상대위치가 변함) —
-         link3_1의 병렬 보강 브라켓(leg 분기: link3_leg_1->link3-1_1->link4-1_1->link5-1_1->adapter_b__1___1__1)의
-         끝단이 관절 반대편의 모터 하우징(motor2_1)과 맞닿는 구조로 보이나, 실제 항상-접촉(베어링 하우징류)인지 CAD/실물로
-         재확인 필요 — 확인 전까지 home 자세(Revolute 48=0) 기준 임시 disable. -->
-    <disable_collisions link1="motor2_1" link2="adapter_b__1___1__1" reason="Default"/>
-    <disable_collisions link1="link1__1__1" link2="adapter_b__1___1__1" reason="Default"/>
-    <!-- 기어 맞물림(gripper_a 24T 피니언 <-> 36T 기어) — 설계상 항상 접촉(치합)하는 쌍이라 self-collision 대상에서 제외. -->
-    <disable_collisions link1="gripper_a_Spur_Gear_24_teeth__2__1" link2="gripper_a_Spur_Gear_36_teeth_1" reason="Default"/>
-    <disable_collisions link1="gripper_a_base_link" link2="gripper_a_Spur_Gear_24_teeth__2__1" reason="Default"/>
-    <!-- 두 36T 기어끼리 직접 맞물려 모터 1개로 양 핑거를 대칭 개폐(24T 피니언->36T A->36T B 직결 기어열) — 설계상 항상 접촉. -->
-    <disable_collisions link1="gripper_a_Spur_Gear_36_teeth__1__1" link2="gripper_a_Spur_Gear_36_teeth_1" reason="Default"/>
-    <!-- component53_1은 닫힌루프 단순화로 남은 link6의 중복/거울 표현(같은 link3에서 z만 0.01 다르게 매달림, gripper_a.xacro
-         파일 헤더 주석 참고) — link6에 고정된 plate1과 사실상 같은 위치라 항상 겹침. -->
-    <disable_collisions link1="gripper_a_component53_1" link2="gripper_a_plate1" reason="Default"/>
-    <!-- gripper_a_link2/4(top_plate에 매달린 미구동 평행팔로워)는 실제로는 link1/link3와 평행 구속되어야 하나 mimic
-         미반영 상태 — 홈포즈(전 관절 0)에서 좁은 링크 간격상 서로 맞닿음. gripper_a.xacro 헤더의 기존 한계 연장선. -->
-    <disable_collisions link1="gripper_a_link4" link2="gripper_a_component53_1" reason="Default"/>
-    <!-- Revolute 29(motor_1->adapter_b_1, 어깨) 반대편 쌍 — link2_1의 병렬 보강 브라켓(leg 분기: link2_leg_1->
-         link2-1__3__1->cap_1) 끝단이 관절 반대편 어깨 기어박스 하우징(gearbox1_1)과 맞닿음. Revolute 48 인근에서
-         본 동일 패턴(브라켓이 관절 하우징을 감싸는 구조)의 반복으로 보이나 마찬가지로 CAD/실물 재확인 필요. -->
-    <disable_collisions link1="cap_1" link2="gearbox1_1" reason="Default"/>
-    <disable_collisions link1="link2-1__3__1" link2="gearbox1_1" reason="Default"/>
-    <!-- base_plate_1의 또 다른 분기 link1_1(브라켓류)가 Revolute 29 반대편의 adapter_b_1과 맞닿음 — 동일 어깨 관절
-         하우징을 감싸는 브라켓 패턴의 반복. -->
-    <disable_collisions link1="link1_1" link2="adapter_b_1" reason="Default"/>
+    <!-- 아래 disable_collisions는 새 URDF(58 link)의 모든 joint(fixed 포함)로부터 자동 도출한
+         "Adjacent"(부모-자식) 쌍만 포함 — 프로그램적으로 100% 기계적 도출, 값 조작 없음.
+         이전 SRDF에 있던 "Default"(자세 무관 항상-접촉으로 실측 확인된 쌍, 예: 기어 치합)는
+         새 토폴로지에서 실제 충돌 체크를 다시 안 해봐서 여기 포함하지 않음 — MoveIt Setup
+         Assistant GUI의 "Regenerate Default Collision Matrix"를 반드시 재실행해서 채울 것.
+         (Adjacent만으로는 기어 치합 등 항상-접촉 쌍이 self-collision 오탐으로 남을 수 있음 — 플래닝이
+         부당하게 막히면 우선 이 GUI 작업부터 확인.) -->
+    <disable_collisions link1="link_031" link2="link_028" reason="Adjacent"/>
+    <disable_collisions link1="link_013" link2="link_015" reason="Adjacent"/>
+    <disable_collisions link1="link_017" link2="link_021" reason="Adjacent"/>
+    <disable_collisions link1="link_006" link2="link_038" reason="Adjacent"/>
+    <disable_collisions link1="link_040" link2="link_033" reason="Adjacent"/>
+    <disable_collisions link1="link_051" link2="link_055" reason="Adjacent"/>
+    <disable_collisions link1="link_049" link2="link_056" reason="Adjacent"/>
+    <disable_collisions link1="link_056" link2="link_042" reason="Adjacent"/>
+    <disable_collisions link1="link_056" link2="link_046" reason="Adjacent"/>
+    <disable_collisions link1="link_049" link2="link_057" reason="Adjacent"/>
+    <disable_collisions link1="link_057" link2="link_043" reason="Adjacent"/>
+    <disable_collisions link1="link_057" link2="link_047" reason="Adjacent"/>
+    <disable_collisions link1="link_049" link2="link_044" reason="Adjacent"/>
+    <disable_collisions link1="link_049" link2="link_045" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="link_029" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="link_031" reason="Adjacent"/>
+    <disable_collisions link1="link_031" link2="link_030" reason="Adjacent"/>
+    <disable_collisions link1="link_028" link2="link_003" reason="Adjacent"/>
+    <disable_collisions link1="link_028" link2="link_001" reason="Adjacent"/>
+    <disable_collisions link1="link_003" link2="link_016" reason="Adjacent"/>
+    <disable_collisions link1="link_016" link2="link_014" reason="Adjacent"/>
+    <disable_collisions link1="link_014" link2="link_013" reason="Adjacent"/>
+    <disable_collisions link1="link_015" link2="link_012" reason="Adjacent"/>
+    <disable_collisions link1="link_012" link2="link_002" reason="Adjacent"/>
+    <disable_collisions link1="link_002" link2="link_022" reason="Adjacent"/>
+    <disable_collisions link1="link_002" link2="link_025" reason="Adjacent"/>
+    <disable_collisions link1="link_012" link2="link_026" reason="Adjacent"/>
+    <disable_collisions link1="link_026" link2="link_010" reason="Adjacent"/>
+    <disable_collisions link1="link_026" link2="link_011" reason="Adjacent"/>
+    <disable_collisions link1="link_011" link2="link_020" reason="Adjacent"/>
+    <disable_collisions link1="link_022" link2="link_019" reason="Adjacent"/>
+    <disable_collisions link1="link_019" link2="link_018" reason="Adjacent"/>
+    <disable_collisions link1="link_018" link2="link_017" reason="Adjacent"/>
+    <disable_collisions link1="link_021" link2="link_004" reason="Adjacent"/>
+    <disable_collisions link1="link_004" link2="link_032" reason="Adjacent"/>
+    <disable_collisions link1="link_004" link2="link_024" reason="Adjacent"/>
+    <disable_collisions link1="link_004" link2="link_008" reason="Adjacent"/>
+    <disable_collisions link1="link_008" link2="link_006" reason="Adjacent"/>
+    <disable_collisions link1="link_038" link2="link_023" reason="Adjacent"/>
+    <disable_collisions link1="link_038" link2="link_036" reason="Adjacent"/>
+    <disable_collisions link1="link_036" link2="link_035" reason="Adjacent"/>
+    <disable_collisions link1="link_036" link2="link_034" reason="Adjacent"/>
+    <disable_collisions link1="link_032" link2="link_005" reason="Adjacent"/>
+    <disable_collisions link1="link_005" link2="link_009" reason="Adjacent"/>
+    <disable_collisions link1="link_009" link2="link_007" reason="Adjacent"/>
+    <disable_collisions link1="link_007" link2="link_027" reason="Adjacent"/>
+    <disable_collisions link1="link_035" link2="link_037" reason="Adjacent"/>
+    <disable_collisions link1="link_036" link2="link_040" reason="Adjacent"/>
+    <disable_collisions link1="link_033" link2="link_039" reason="Adjacent"/>
+    <disable_collisions link1="link_039" link2="link_041" reason="Adjacent"/>
+    <disable_collisions link1="link_041" link2="link_051" reason="Adjacent"/>
+    <disable_collisions link1="link_055" link2="link_052" reason="Adjacent"/>
+    <disable_collisions link1="link_056" link2="link_053" reason="Adjacent"/>
+    <disable_collisions link1="link_057" link2="link_054" reason="Adjacent"/>
+    <disable_collisions link1="link_046" link2="link_048" reason="Adjacent"/>
+    <disable_collisions link1="link_047" link2="link_050" reason="Adjacent"/>
+    <disable_collisions link1="link_051" link2="link_049" reason="Adjacent"/>
 </robot>

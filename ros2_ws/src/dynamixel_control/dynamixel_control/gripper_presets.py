@@ -8,7 +8,11 @@ robot_arm_description의 urdf/grippers/<gripper>.xacro 모듈화(xacro:arg gripp
 
 GRIPPER_PRESETS = {
     "gripper_a": {
-        "gripper_joints": ["gripper_a_joint5", "gripper_a_joint6"],
+        # 2026-07-15 Isaac Sim 재export(robotarm_urdf_20260711.urdf) 기준 — 그리퍼가
+        # gripper_drive_joint 하나만 실제 구동되고 나머지 8개(크랭크/조 관절)는 URDF의
+        # <mimic> 태그로 자동 종속(평행 4절링크 구속을 URDF 레벨에서 정식 표현).
+        # 기존 gripper_a_joint5/6(두 관절을 동일 값으로 미러링하던 방식)에서 갈아탐.
+        "gripper_joints": ["gripper_drive_joint"],
         "gripper_ids": [5],
         "gripper_open_tick": 2446,    # HW-8 실측 (215도, 2026-07-08)
         "gripper_close_tick": 3186,   # HW-8 실측 (280도, 2026-07-08)
