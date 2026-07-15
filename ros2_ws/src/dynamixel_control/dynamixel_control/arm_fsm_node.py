@@ -48,15 +48,16 @@ from moveit_msgs.msg import (MotionPlanRequest, Constraints, PositionConstraint,
 from moveit_msgs.srv import GetPositionFK
 from shape_msgs.msg import SolidPrimitive
 from robot_arm_msgs.msg import ArrivalStatus, ChassisMode, ArmStatus, DetectedObject
+from dynamixel_control.gripper_presets import DEFAULT_GRIPPER, get_preset
 
 
-# ⚠️ URDF/SRDF가 아직 팔 5축 중 3축(joint_1~3)만 반영(WIP, CAD 미완성) — MoveIt의
-# 6DOF pose goal(position+orientation)은 이 3관절로 일반적으로 풀리지 않음(HW-7 실측
-# 확인: /compute_ik가 현재 실제 tip pose에도 NO_IK_SOLUTION 반환). URDF가 5축으로
-# 확장되기 전까지는 'analytic' 모드(FK+수치 자코비안으로 위치만 맞추는 3DOF IK, 방향
-# 무시)를 기본으로 쓰고, MoveGroup 경로(§6 결정 '가')는 남겨두되 ik_mode:='moveit'로
+# 2026-07-15 Isaac Sim 기반 재export(robotarm_urdf_20260711.urdf) 기준 — URDF 자체는
+# 팔 5축(arm_joint_1~5)을 전부 반영하지만, analytic IK(FK+수치 자코비안)는 아직 앞의
+# 3관절만 풀도록 남겨둠(HW-7 당시 6DOF pose goal이 NO_IK_SOLUTION이던 문제 회피용으로
+# 도입된 3DOF 위치전용 IK — URDF가 3축만 있어서가 아니라 solver를 아직 5DOF로 확장 안
+# 해서임, 방향은 여전히 무시). MoveGroup 경로(§6 결정 '가')는 남겨두되 ik_mode:='moveit'로
 # 전환 가능하게만 유지.
-ARM_JOINT_NAMES = ['joint_1', 'joint_2', 'joint_3']
+ARM_JOINT_NAMES = ['arm_joint_1', 'arm_joint_2', 'arm_joint_3']
 
 
 # ──────────────────────────────────────────────
@@ -99,10 +100,10 @@ class ArmFsmNode(Node):
         # ── 파라미터 ──────────────────────────────
         # MoveIt
         self.declare_parameter('planning_group', 'arm')          # SRDF group
-        # ⚠️ URDF 미완성(WIP) 현재 tip: Link4_1_1 (실물 CAD 3관절만 반영, joint_4/5 축 아직
-        # URDF 미통합 — 실하드웨어는 1~5축 서보 5개 + 그리퍼 서보 1개 총 6개 존재).
-        # URDF가 5축 전체로 확장되면 이 기본값과 SRDF arm 그룹을 함께 갱신할 것.
-        self.declare_parameter('tip_link', 'Link4_1_1')          # 그리퍼 부모 링크
+        # tip_link: arm_joint_5 이후 고정 조인트 체인의 마지막 링크(link_051) — 여기서
+        # gripper_drive_joint(구동)와 gripper_linkage_base_fixed(그리퍼 고정 베이스)가 갈라짐.
+        # 2026-07-15 Isaac Sim 재export(robotarm_urdf_20260711.urdf) 기준.
+        self.declare_parameter('tip_link', 'link_051')            # 그리퍼 부모 링크
         self.declare_parameter('base_frame', 'base_link')        # planning frame (리프트 기준)
         self.declare_parameter('lift_height', 0.10)              # LIFT 시 base_link +Z [m]
         self.declare_parameter('pick_frame_id', 'camera_color_optical_frame')
@@ -117,18 +118,23 @@ class ArmFsmNode(Node):
         self.declare_parameter('ik_tol', 0.01)          # [m] 위치 수렴 허용오차
         self.declare_parameter('ik_accept_tol', 0.03)   # [m] 최종 실패 판정 기준
         self.declare_parameter('arm_move_speed', 0.5)   # [rad/s] 직접명령 시 소요시간 추정용
-        # 그리퍼 (prismatic finger, 단위 m — 실측 캘리브 필요)
-        self.declare_parameter('gripper_joints', ['left_finger_joint', 'right_finger_joint'])
-        self.declare_parameter('gripper_open', 0.02)
-        self.declare_parameter('gripper_close', 0.0)
+        # 그리퍼 — gripper_type 이 gripper_presets.GRIPPER_PRESETS 의 기본값을 고르고,
+        # 아래 개별 파라미터는 필요 시 CLI/런치로 여전히 개별 오버라이드 가능.
+        self.declare_parameter('gripper_type', DEFAULT_GRIPPER)
+        gripper_type = self.get_parameter('gripper_type').value
+        gpreset = get_preset(gripper_type, self.get_logger())
+
+        self.declare_parameter('gripper_joints', gpreset['gripper_joints'])
+        self.declare_parameter('gripper_open', gpreset['gripper_open_m'])
+        self.declare_parameter('gripper_close', gpreset['gripper_close_m'])
         # 전류(effort) 임계 — moveit_dynamixel_bridge 가 /joint_states.effort 에
-        # raw signed PRESENT_CURRENT(XL430 기준 1단위≈2.69mA)를 발행. 아래는 placeholder,
+        # raw signed PRESENT_CURRENT(XL430 기준 1단위≈2.69mA)를 발행. preset 값은 placeholder,
         # 실측 캘리브 필요(TODO): 무부하 파지 전류/낙하 시 전류를 측정해 임계값 설정.
-        self.declare_parameter('grasp_effort_thresh', 80.0)   # ≈215mA, placeholder
-        self.declare_parameter('drop_effort_thresh', 20.0)    # ≈54mA, placeholder
+        self.declare_parameter('grasp_effort_thresh', gpreset['grasp_effort_thresh'])
+        self.declare_parameter('drop_effort_thresh', gpreset['drop_effort_thresh'])
         # 동작 제어
         self.declare_parameter('max_regrasp', 3)
-        self.declare_parameter('gripper_action_time', 1.0)       # 그리퍼 동작 시간 [s]
+        self.declare_parameter('gripper_action_time', gpreset['gripper_action_time'])  # [s]
         self.declare_parameter('tick_rate', 10.0)
 
         g = self.get_parameter
@@ -147,6 +153,7 @@ class ArmFsmNode(Node):
         self.ik_tol = g('ik_tol').value
         self.ik_accept_tol = g('ik_accept_tol').value
         self.arm_move_speed = g('arm_move_speed').value
+        self.gripper_type = gripper_type
         self.gripper_joints = list(g('gripper_joints').value)
         self.gripper_open = g('gripper_open').value
         self.gripper_close = g('gripper_close').value
@@ -222,7 +229,9 @@ class ArmFsmNode(Node):
         self._tick_group = MutuallyExclusiveCallbackGroup()
         self.create_timer(period, self._tick, callback_group=self._tick_group)
         self.get_logger().info(
-            f'arm_fsm_node started (state=IDLE, heartbeat={HEARTBEAT_RATE_HZ}Hz)')
+            f'arm_fsm_node started (MoveIt 경로, state=IDLE, gripper_type={self.gripper_type}, '
+            f'heartbeat={HEARTBEAT_RATE_HZ}Hz)'
+        )
 
     # ── 콜백 ───────────────────────────────────
 
@@ -560,9 +569,10 @@ class ArmFsmNode(Node):
     def _solve_position_ik(self, target_xyz, q_init):
         """FK + 수치 자코비안(finite-difference) 로 위치만 맞추는 3DOF IK.
 
-        URDF가 joint_1~3만 반영해 MoveIt 6DOF pose IK가 원천 불가(HW-7 실측 확인,
-        compute_ik가 현재 실제 tip pose에도 NO_IK_SOLUTION). 방향은 포기하고 위치만
-        댐핑 최소자승(Levenberg-Marquardt 유사)으로 반복 수렴.
+        ARM_JOINT_NAMES가 앞 3관절(arm_joint_1~3)만 써서 MoveIt 6DOF pose IK 대신 이 방식을
+        기본으로 씀(HW-7 실측 확인, compute_ik가 현재 실제 tip pose에도 NO_IK_SOLUTION 반환하던
+        문제 회피 — URDF 자체는 5축 다 있음, solver가 아직 5DOF로 확장 안 됨). 방향은 포기하고
+        위치만 댐핑 최소자승(Levenberg-Marquardt 유사)으로 반복 수렴.
         """
         q = np.array(q_init, dtype=float)
         target = np.array(target_xyz, dtype=float)
