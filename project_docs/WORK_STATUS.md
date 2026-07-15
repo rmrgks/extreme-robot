@@ -8,6 +8,18 @@
 
 ---
 
+## 서보 디버깅 스크립트 정리 (2026-07-15)
+
+HW-7 섹션(216행)의 "다음 세션 확인 포인트 — `check_servo.py` 등을 삭제할지 편입할지"를
+해결. `check_servo.py`/`diag_servo.py`/`fix_servo.py`/`fix_servo2.py`/`move_servo.py` 5개는
+전부 ID=0 서보 하드코딩 + Operating Mode·Position Limit 복구(HW-2~6 세션 당시 이상 대응)용
+1회성 스크립트로, 이후 HW-7·HW-8·STOWING 세션에서 해당 서보들이 정상 동작해 문제가 재현되지
+않아 삭제. `capture_pick.py`(범용 디버그 스냅샷)·`hw7_gripper_bottle_test.py`(그리퍼 캘리브값
+280°/215° 출처, `moveit_dynamixel_bridge`에 아직 반영 전이라 유지)·`measure_position_error.py`
+(범용 perception 정확도 측정)는 계속 사용 중이라 유지.
+
+---
+
 ## `feat/contract-v2-arm-fsm` 브랜치 origin/main 재합류 + 실제 STOWING 모션 구현 (2026-07-15)
 
 이전 세션들이 `feat/contract-v2-arm-fsm` 브랜치에서 계약 v2 FSM(conjunction 게이트·
