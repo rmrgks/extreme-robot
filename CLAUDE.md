@@ -22,17 +22,17 @@ ROS 2 Humble workspace for the 2025 극한로봇 (Extreme Robot) competition: a 
 
 - `./ros2_ws` is bind-mounted to `/root/ros2_ws` in the container, so host edits to `ros2_ws/src/` appear instantly inside.
 - **Only `ros2_ws/src/` is version-controlled.** Build outputs (`build/`, `install/`, `log/`) are gitignored — each developer runs `colcon build` in their own container.
-- Two compose files exist: `docker-compose.yml` and `docker-compose.wsl.yml`. Both run `privileged: true` with `network_mode: host` and mount X11/WSLg sockets for GUI. The container is `ros2_humble`.
+- Compose files: `docker-compose.yml` (기본) + `docker-compose.gpu.yml` (Jetson GPU override — `-f`로 얹어 쓴다). WSL2 지원은 제거됨. 컨테이너는 `ros2_humble`, `privileged: true` + `network_mode: host` + **`ipc: host`**.
+- **`ipc: host`는 파워트레인 연동에 필수다.** 파워트레인은 같은 Jetson의 **별도 컨테이너**에서 ROS 2 노드를 돌리고 DDS로만 통신한다. Fast-DDS는 같은 호스트면 공유메모리(`/dev/shm`)로 데이터를 보내는데 Docker는 컨테이너마다 별도 `/dev/shm`을 준다 → `ipc: host`가 없으면 **discovery는 되는데 데이터가 한 건도 안 오는 조용한 실패**가 난다. 양쪽 컨테이너 모두 필요하다.
 - The container runs `privileged`, so host devices (e.g. the Dynamixel USB serial adapter at `/dev/ttyUSB0`, the camera) are reachable without explicit `devices:` mappings — but the hardware must actually be plugged into the host.
 
 ## Common commands
 
 Start container + enter (host):
 ```bash
-# Ubuntu native
 xhost +local:docker && docker compose up -d
-# WSL2
-xhost +local: && docker compose -f docker-compose.wsl.yml up -d
+# Jetson GPU 가속까지 쓸 때만
+xhost +local:docker && docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 docker exec -it ros2_humble bash   # ROS already sourced via .bashrc
 ```
@@ -56,7 +56,17 @@ System dependencies go in the **`Dockerfile`**, not ad-hoc `apt install`, so the
 
 > Note: the Dynamixel libraries are pulled via apt (`ros-humble-dynamixel-sdk`, `ros-humble-dynamixel-workbench`) — **not** git submodules. An earlier broken submodule/gitlink for these was removed.
 
-## Packages (`ros2_ws/src/`)
+## 파워트레인 계약 (중요)
+
+파워트레인 팀([power-train-sw](https://github.com/lightminn/power-train-sw))과 **같은 Jetson의 별도 컨테이너**에서 각자 ROS 2 노드를 돌리고 **DDS로만** 통신한다. 워크스페이스를 서로 오버레이하지 않으며, 공유하는 것은 메시지 계약뿐이다. 파워트레인은 `robot_arm_msgs`의 `.msg`만 벤더링해 자기들이 직접 빌드한다(ROS 2는 wire에서 **패키지명 + 구조 해시**로 매칭하므로 동일한 `.msg`로 각자 빌드하면 붙는다).
+
+- **값 어휘의 단일 출처는 `dynamixel_control/contract.py`** — 파워트레인의 `powertrain_ros/contract.py`와 짝이다. **여기 없는 status 문자열을 새로 만들지 말 것.** 파워트레인은 `contract.ARM_STATUSES` 밖의 값을 받으면 즉시 `CONTRACT_VIOLATION` + motion hold를 건다. 어휘 변경은 **양 팀 합의 사항**이다.
+- QoS는 `dynamixel_control/qos_profiles.py`. heartbeat 계열은 **KeepLast 1**이다 — depth를 키우면 낡은 샘플이 큐에 쌓여 파워트레인의 신선도 판정이 어긋난다.
+- **`/arm_status`는 `arm_fsm`의 heartbeat 타이머 한 곳에서만 발행한다.** 상태 핸들러는 `_set_status()`로 값만 바꾼다. 발행 경로가 둘이 되면 `header.stamp` 순서가 뒤집힐 수 있는데, 파워트레인은 stamp가 0.5초 이상 역행하면 **영구 latch**(프로세스 재시작 전까지 해제 불가)를 건다.
+- **`MISSION_STOP`만이 팔 작업 허가다.** `DRIVING`을 포함한 나머지 mode는 전부 잠금(default-deny).
+  - ⚠️ **`arm_fsm_node.py`는 아직 `DRIVING`에서 팔을 언락한다 — 계약 위반이자 안전 결함(주행 중 팔이 풀림).** 미수정 상태.
+- **차가 움직이려면 팔이 `STOWED_LOCKED` 또는 `CARRYING_LOCKED`를 신선하게 발행해야 한다**(`contract.DRIVE_READY_STATUSES`). 그 외 status는 전부 주행 불가다.
+  - ⚠️ **우리는 아직 이 둘을 발행하지 않는다 → 지금 붙이면 차가 출발하지 못한다.** 구현하려면 **접힘 자세(stow posture) 정의가 선행**이며, 계약상 `all-zero home`은 금지다.
 
 ### robot_arm_msgs (ament_cmake) — 공통 메시지 패키지
 양팀(로봇팔·파워트레인)이 공유하는 커스텀 메시지 5개: `DetectedObject`(class_id/name/confidence/`geometry_msgs/Pose`/bbox), `DetectedObjectArray`(header + objects[]), `ArrivalStatus`, `ChassisMode`, `ArmStatus`. 인터페이스 상세는 `CLAUDE_Plan.md` §1 참고.

@@ -1,0 +1,21 @@
+# Jetson GPU 가속 override (base compose 위에 얹어서 사용)
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# 이 설정은 nvidia-container-runtime이 등록된 호스트에서만 동작한다. base
+# compose에 직접 넣으면 GPU 없는 팀원 환경에서 컨테이너 생성이 실패하므로 분리했다.
+#
+# 경로 기본값은 Jetson(JetPack) 기준. 다르면 .env 나 셸 환경변수로 덮어쓴다:
+#   CUDA_HOME=/usr/local/cuda-12.4 CUDNN_LIBS=$HOME/mylibs docker compose -f ... up -d
+services:
+  ros2:
+    environment:
+      - XAUTHORITY=/root/.Xauthority
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - LD_LIBRARY_PATH=${CUDA_HOME:-/usr/local/cuda-12.6}/targets/aarch64-linux/lib:/opt/cudnn-libs
+    volumes:
+      - ${CUDA_HOME:-/usr/local/cuda-12.6}:${CUDA_HOME:-/usr/local/cuda-12.6}:ro
+      - ${CUDNN_LIBS:-${HOME}/.cudnn-libs}:/opt/cudnn-libs:ro
+      - ${HOME}/.Xauthority:/root/.Xauthority:ro
+    runtime: nvidia

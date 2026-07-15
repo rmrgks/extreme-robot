@@ -9,22 +9,20 @@ services:
     tty: true
     environment:
       - DISPLAY=${DISPLAY}
-      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
-      - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
-      - PULSE_SERVER=${PULSE_SERVER}
       - QT_X11_NO_MITSHM=1
-      - XAUTHORITY=/root/.Xauthority
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=all
-      - LD_LIBRARY_PATH=/usr/local/cuda-12.6/targets/aarch64-linux/lib:/opt/cudnn-libs
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - /mnt/wslg:/mnt/wslg
       - ./ros2_ws:/root/ros2_ws
       - /dev:/dev
-      - /usr/local/cuda-12.6:/usr/local/cuda-12.6:ro
-      - /home/zetin/.cudnn-libs:/opt/cudnn-libs:ro
-      - /home/zetin/.Xauthority:/root/.Xauthority:ro
     network_mode: host
+    # 파워트레인 컨테이너와 같은 DDS 그래프에서 통신하려면 필수.
+    # Fast-DDS 는 같은 호스트면 공유메모리(/dev/shm)로 데이터를 보내는데, Docker 는
+    # 컨테이너마다 별도 /dev/shm 을 준다. 이게 없으면 discovery 는 성공해 토픽 목록에
+    # 보이지만 데이터는 한 건도 안 온다(조용한 실패). 파워트레인 powertrain_ros 도 동일.
+    ipc: host
     privileged: true
-    runtime: nvidia
+
+# Jetson에서 GPU 가속(nvidia runtime + CUDA/cuDNN)을 쓰려면 override를 얹는다:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# GPU 설정을 이 파일에 직접 넣으면 nvidia 런타임이 없는 팀원 환경에서
+# `unknown or invalid runtime name: nvidia` 로 컨테이너 생성 자체가 실패한다.

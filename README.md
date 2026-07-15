@@ -50,13 +50,16 @@ cd extreme-robot
 # 2) 이미지 빌드 (첫 빌드는 베이스 이미지 다운로드로 10~20분)
 docker compose build
 
-# 3) 컨테이너 시작 — 환경에 맞는 것 하나만
-xhost +local:docker && docker compose up -d                          # Ubuntu 네이티브
-xhost +local:       && docker compose -f docker-compose.wsl.yml up -d # WSL2 (Windows)
+# 3) 컨테이너 시작
+xhost +local:docker && docker compose up -d
 
 # 4) 컨테이너 진입 (ROS 2 환경 자동 소싱됨)
 docker exec -it ros2_humble bash
 ```
+
+> **WSL2는 더 이상 지원하지 않습니다.** X11/WSLg가 자주 깨져 유지 비용이 커서 `docker-compose.wsl.yml`을 제거했습니다. Ubuntu 네이티브(또는 Jetson)를 쓰세요.
+
+> **Jetson에서 GPU 가속까지 쓰려면** 아래 §2-1을 보세요. 기본 `docker compose up -d`에는 GPU 설정이 들어있지 않습니다.
 
 컨테이너 안에서 빌드·실행:
 
@@ -68,6 +71,42 @@ source install/setup.bash
 
 `./ros2_ws`는 호스트와 컨테이너가 공유합니다. 호스트에서 `ros2_ws/src/`를 수정하면 컨테이너에 즉시 반영됩니다.
 빌드 산출물(`build/`, `install/`, `log/`)은 `.gitignore`로 제외되니, 각자 컨테이너에서 `colcon build` 하세요.
+
+---
+
+## 2-1. Jetson GPU 가속 (Jetson 사용자만)
+
+YOLO 추론을 GPU로 돌리려면 `docker-compose.gpu.yml`을 **기본 compose 위에 얹어서** 실행합니다.
+
+```bash
+xhost +local:docker
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+`-f`를 두 번 쓰는 이유는, GPU 설정을 기본 `docker-compose.yml`에 직접 넣으면 **GPU가 없는 팀원 환경에서 컨테이너 생성 자체가 실패**하기 때문입니다(`unknown or invalid runtime name: nvidia`). 그래서 GPU 설정만 별도 파일로 분리해 두었습니다.
+
+### 사전 조건
+
+| 항목 | 확인 |
+| --- | --- |
+| nvidia-container-runtime 등록 | `docker info \| grep -i runtime` 에 `nvidia` 가 보여야 함 |
+| NVIDIA 드라이버 | `nvidia-smi` 가 동작해야 함 |
+| CUDA 툴킷 | 기본값 `/usr/local/cuda-12.6` |
+| cuDNN 라이브러리 | 기본값 `$HOME/.cudnn-libs` (`.so` 파일만 모아둔 디렉터리) |
+
+### 경로가 다를 때
+
+기본 경로는 JetPack 기준입니다. 다르면 환경 변수로 덮어씁니다.
+
+```bash
+CUDA_HOME=/usr/local/cuda-12.4 \
+CUDNN_LIBS=$HOME/mylibs \
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+> ⚠️ 없는 경로를 마운트하면 Docker가 **에러 없이 root 소유의 빈 디렉터리를 만듭니다.** 컨테이너는 뜨지만 cuDNN을 못 찾거나 X11 인증이 조용히 깨지므로, 위 경로가 실제로 존재하는지 먼저 확인하세요.
+
+> 참고: PyPI의 `torch`는 범용 aarch64 빌드(CPU 전용)라, Jetson에서 GPU를 쓰려면 Jetson용 wheel로 교체해야 합니다(`pypi.jetson-ai-lab.io/jp6/cu126`). 아직 Dockerfile에 반영되지 않아 컨테이너 재생성 시 수동 재설치가 필요합니다.
 
 ---
 
@@ -216,7 +255,7 @@ ros2 run dynamixel_control yolo_detection --ros-args \
 ```bash
 # 아침에 시작
 git pull
-xhost +local:docker && docker compose up -d            # (WSL2는 -f docker-compose.wsl.yml)
+xhost +local:docker && docker compose up -d
 docker exec -it ros2_humble bash
 
 # 작업 후 push (호스트에서)
@@ -239,6 +278,8 @@ docker compose build      # 캐시가 꼬이면 docker compose build --no-cache
 docker compose up -d
 ```
 
+> Jetson에서 GPU를 쓰고 있었다면 마지막 줄을 `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d` 로 바꿔 실행하세요. 그냥 `up -d` 하면 GPU 설정 없이 재생성됩니다(§2-1).
+
 ### 새 ROS 2 패키지 추가
 
 ```bash
@@ -255,15 +296,19 @@ ros2 pkg create --build-type ament_python my_package
 
 **GUI 창이 안 뜸**
 ```bash
-xhost +local:docker      # Ubuntu / WSL2는 xhost +local:
+xhost +local:docker
 echo $DISPLAY            # 보통 :0 또는 :1
 ```
 
-**WSL2에서 GUI가 갑자기 안 될 때** — WSLg가 죽은 경우. PowerShell(관리자)에서:
-```powershell
-wsl --shutdown
+**파워트레인과 토픽은 보이는데 데이터가 안 옴** — `ipc: host` 누락입니다.
+
+`ros2 topic list`에는 토픽이 멀쩡히 뜨고 publisher 수도 맞는데 `ros2 topic echo`가 아무것도 출력하지 않는 증상입니다. Fast-DDS는 상대가 같은 호스트면 공유메모리(`/dev/shm`)로 데이터를 보내는데, Docker는 컨테이너마다 별도 `/dev/shm`을 줍니다. discovery는 UDP로 하니 성공하고, 데이터만 조용히 사라집니다.
+
+```bash
+docker inspect ros2_humble --format '{{.HostConfig.IpcMode}}'   # host 여야 함
 ```
-이후 WSL 터미널을 다시 열고 컨테이너를 재시작합니다.
+
+**양쪽 컨테이너 모두** `ipc: host`여야 합니다 — 우리 `docker-compose.yml`과 파워트레인의 `docker-compose.jetson.yml`(`powertrain_ros` 서비스) 둘 다입니다.
 
 **ros2 명령이 안 됨** — 소싱이 안 된 경우 수동으로:
 ```bash

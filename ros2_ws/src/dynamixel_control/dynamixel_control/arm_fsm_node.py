@@ -29,6 +29,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from rclpy.time import Time
 from rclpy.duration import Duration as RclpyDuration
@@ -59,21 +61,18 @@ ARM_JOINT_NAMES = ['arm_joint_1', 'arm_joint_2', 'arm_joint_3']
 
 
 # ──────────────────────────────────────────────
-# status / mode 문자열 (⚠️ 잠정값 — 파워트레인 팀과 합의 후 확정, §3·§6-C)
+# status / mode 문자열 — 단일 출처는 contract.py (파워트레인 contract.py 와 짝).
+# 여기서 상수를 새로 정의하지 말 것. 어휘 변경은 양 팀 합의 사항이다.
 # ──────────────────────────────────────────────
-ARRIVED_PICKUP = 'ARRIVED_PICKUP'      # 박스 정렬 완료 → 집어
-ARRIVED_DROP = 'ARRIVED_DROP'          # 하역 지점 도착 → 내려
+from dynamixel_control.contract import (       # noqa: E402
+    ARRIVED_PICKUP, ARRIVED_DROP,
+    ARM_IDLE, ARM_PERCEIVING, ARM_PLANNING, ARM_EXECUTING,
+    ARM_CARRYING, ARM_DONE, ARM_FAILED,
+    LOCK_MODES, MODE_DRIVING, HEARTBEAT_RATE_HZ,
+)
+from dynamixel_control.qos_profiles import HEARTBEAT_QOS, ARRIVAL_QOS   # noqa: E402
 
-ARM_IDLE = 'IDLE'
-ARM_PERCEIVING = 'PERCEIVING'
-ARM_PLANNING = 'PLANNING'
-ARM_EXECUTING = 'EXECUTING'
-ARM_CARRYING = 'CARRYING'
-ARM_DONE = 'DONE'
-ARM_FAILED = 'FAILED'
-
-LOCK_MODES = {'CORNERING', 'ROUGH_TERRAIN', 'FOLLOW_LEAD'}
-DRIVING_MODE = 'DRIVING'
+DRIVING_MODE = MODE_DRIVING
 
 # moveit_msgs/MoveItErrorCodes.SUCCESS
 MOVEIT_SUCCESS = 1
@@ -164,13 +163,15 @@ class ArmFsmNode(Node):
         self.gripper_action_time = g('gripper_action_time').value
 
         # ── 토픽/액션 I/O ─────────────────────────
+        # QoS 는 계약(contract.py) 기준. heartbeat 계열을 depth 10 으로 두면 낡은 샘플이
+        # 큐에 쌓여 파워트레인의 age(신선도) 판정이 어긋난다.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(DetectedObject, '/pick_target', self._on_pick_target, latched)
-        self.create_subscription(ArrivalStatus, '/arrival_status', self._on_arrival, 10)
-        self.create_subscription(ChassisMode, '/chassis_mode', self._on_chassis_mode, 10)
+        self.create_subscription(ArrivalStatus, '/arrival_status', self._on_arrival, ARRIVAL_QOS)
+        self.create_subscription(ChassisMode, '/chassis_mode', self._on_chassis_mode, HEARTBEAT_QOS)
         self.create_subscription(JointState, '/joint_states', self._on_joint_states, 10)
 
-        self.pub_status = self.create_publisher(ArmStatus, '/arm_status', 10)
+        self.pub_status = self.create_publisher(ArmStatus, '/arm_status', HEARTBEAT_QOS)
 
         # TF: base_link ← tip_link 조회용 (LIFT 시 현재 TCP 기준 수직 리프트 계산)
         self.tf_buffer = Buffer()
@@ -207,10 +208,29 @@ class ArmFsmNode(Node):
         self._arm_goal_handle = None
         self._grip_sent = False            # 상태 진입 시 _transition에서 리셋
 
+        # ── heartbeat ─────────────────────────────
+        # 계약: 현재 상태를 10Hz 로 끊임없이 발행한다. 0.5초 넘게 끊기면 파워트레인이
+        # arm_status_stale 로 차를 세운다.
+        #
+        # 발행 경로는 **반드시 이 타이머 하나뿐**이어야 한다. 상태 핸들러가 각자
+        # publish 하면 stamp 가 뒤섞여 나갈 수 있는데, 파워트레인은 stamp 가 0.5초 이상
+        # 역행하면 **영구 latch**(프로세스 재시작 전까지 해제 불가)를 건다.
+        # 그래서 핸들러는 _set_status() 로 값만 바꾸고, 실제 발행은 여기서만 한다.
+        #
+        # 별도 콜백그룹인 이유: _tick 은 analytic IK 의 FK 호출에서 블로킹 대기한다.
+        # 같은 그룹이면 IK 도는 동안 heartbeat 가 굶어 stale 판정을 맞는다.
+        # → main() 이 MultiThreadedExecutor 로 띄운다.
+        self._status = ARM_IDLE
+        self._hb_group = MutuallyExclusiveCallbackGroup()
+        self.create_timer(1.0 / HEARTBEAT_RATE_HZ, self._publish_heartbeat,
+                          callback_group=self._hb_group)
+
         period = 1.0 / g('tick_rate').value
-        self.create_timer(period, self._tick)
+        self._tick_group = MutuallyExclusiveCallbackGroup()
+        self.create_timer(period, self._tick, callback_group=self._tick_group)
         self.get_logger().info(
-            f'arm_fsm_node started (MoveIt 경로, state=IDLE, gripper_type={self.gripper_type})'
+            f'arm_fsm_node started (MoveIt 경로, state=IDLE, gripper_type={self.gripper_type}, '
+            f'heartbeat={HEARTBEAT_RATE_HZ}Hz)'
         )
 
     # ── 콜백 ───────────────────────────────────
@@ -257,10 +277,14 @@ class ArmFsmNode(Node):
             handler()
 
     def _do_idle(self):
-        pass
+        # ⚠️ 계약 v2 미구현 지점 — 접힘 자세(stow posture) 정의 후 여기가 바뀐다.
+        #    파워트레인은 STOWED_LOCKED / CARRYING_LOCKED 만 "주행 가능"으로 인정한다
+        #    (contract.DRIVE_READY_STATUSES). IDLE 을 아무리 성실히 발행해도 **차는 못 움직인다.**
+        #    최종 형태: 기동 시 접힘 자세로 이동(STOWING) → 자세·속도·토크 확인 → STOWED_LOCKED.
+        self._set_status(ARM_IDLE)
 
     def _do_perceive(self):
-        self._publish_status(ARM_PERCEIVING)
+        self._set_status(ARM_PERCEIVING)
         if self.pick_target is None:
             return
         if self.pick_target.pose.position.z == 0.0:   # depth 무효 (Phase 2 require_depth 기준)
@@ -270,11 +294,11 @@ class ArmFsmNode(Node):
 
     def _do_plan(self):
         """파지 목표로 이동 시작. 디스패치만 하고 DESCEND에서 대기."""
-        self._publish_status(ARM_PLANNING)
+        self._set_status(ARM_PLANNING)
         if self.ik_mode == 'moveit':
             grasp_pose = self._grasp_pose()
             if grasp_pose is None:
-                self._publish_status(ARM_FAILED)
+                self._set_status(ARM_FAILED)
                 self._transition(State.IDLE)
                 return
             self._begin_arm_move(grasp_pose)
@@ -283,24 +307,25 @@ class ArmFsmNode(Node):
 
         target = self._grasp_target_xyz()
         if target is None or not self._move_to_xyz(target):
-            self._publish_status(ARM_FAILED)
+            self._set_status(ARM_FAILED)
             self._transition(State.IDLE)
             return
         self._transition(State.DESCEND)
 
     def _do_descend(self):
         """MoveIt 모션 결과 대기 (저속 실행 = 하강 포함). TODO: 접촉 시 arm effort 감시."""
-        self._publish_status(ARM_EXECUTING)
+        self._set_status(ARM_EXECUTING)
         if self._motion_state == 'active':
             return
         ok = self._motion_ok
         self._motion_state = 'idle'
         self._transition(State.GRASP_CHECK if ok else State.IDLE)
         if not ok:
-            self._publish_status(ARM_FAILED)
+            self._set_status(ARM_FAILED)
 
     def _do_grasp_check(self):
         """그리퍼 닫고 effort(전류)로 파지 판정."""
+        self._set_status(ARM_EXECUTING)
         if not self._grip_sent:
             self._send_gripper(self.gripper_close)
             self._grip_sent = True
@@ -316,7 +341,7 @@ class ArmFsmNode(Node):
 
     def _do_lift(self):
         """수직 리프트 → 운반 자세 (base_link +Z, 현재 tip TF 기준)."""
-        self._publish_status(ARM_EXECUTING)
+        self._set_status(ARM_EXECUTING)
         if self._motion_state == 'active':
             return
         if self._motion_state == 'done':
@@ -341,7 +366,7 @@ class ArmFsmNode(Node):
 
     def _do_carry(self):
         """운반 중 그리퍼 effort 감시 → 급감 시 DROP."""
-        self._publish_status(ARM_CARRYING)
+        self._set_status(ARM_CARRYING)
         if self._elapsed() < 0.5:          # 진입 직후 dwell (오탐 방지)
             return
         if self._gripper_effort() < self.drop_thresh:
@@ -351,7 +376,7 @@ class ArmFsmNode(Node):
 
     def _do_regrasp(self):
         self.regrasp_cnt += 1
-        self._publish_status(ARM_FAILED)
+        self._set_status(ARM_FAILED)
         if self.regrasp_cnt > self.max_regrasp:
             self.get_logger().error('재파지 한계 초과 → ABORT')
             self._transition(State.ABORT)
@@ -359,7 +384,7 @@ class ArmFsmNode(Node):
             self._transition(State.PERCEIVE)   # 파워트레인 ARRIVED_PICKUP 재발행 가정
 
     def _do_release(self):
-        self._publish_status(ARM_EXECUTING)
+        self._set_status(ARM_EXECUTING)
         if not self._grip_sent:
             self._send_gripper(self.gripper_open)
             self._grip_sent = True
@@ -368,16 +393,24 @@ class ArmFsmNode(Node):
             self._transition(State.DONE)
 
     def _do_done(self):
-        self._publish_status(ARM_DONE)
+        self._set_status(ARM_DONE)
         self.pick_target = None
         self._transition(State.IDLE)
 
     def _do_abort(self):
-        self._publish_status(ARM_FAILED)
+        self._set_status(ARM_FAILED)
         self._transition(State.IDLE)
 
     def _do_locked(self):
         # 현재 자세 홀드: MoveIt에 새 goal 안 보냄 → 브릿지가 torque로 마지막 위치 유지.
+        # status 는 직전 값을 유지한다(heartbeat 타이머가 계속 발행하므로 침묵하지 않는다).
+        #
+        # ⚠️ 계약 v2 미구현 지점 — 여기가 STOWED_LOCKED / CARRYING_LOCKED 가 될 자리다.
+        #    파워트레인은 이 두 status 만 "주행 가능"으로 인정하므로(DRIVE_READY_STATUSES),
+        #    지금처럼 IDLE/CARRYING 을 유지하면 **차는 잠긴 채로 출발하지 못한다.**
+        #    구현하려면: 접힘 자세 정의 → 자세 근접·전 관절 velocity≈0·dwell·토크 유지·
+        #    controller fault 0 을 실제로 확인한 뒤에만 *_LOCKED 를 발행해야 한다.
+        #    (지금 브릿지는 /joint_states 에 velocity 를 싣지 않아 그 확인이 불가능하다.)
         pass
 
     # ── MoveIt 팔 모션 ─────────────────────────
@@ -634,24 +667,38 @@ class ArmFsmNode(Node):
         self._state_enter_t = self.get_clock().now()
         self._grip_sent = False
 
-    def _publish_status(self, status):
+    def _set_status(self, status):
+        """발행할 현재 상태를 갱신한다. 실제 발행은 _publish_heartbeat 가 전담한다.
+
+        여기서 직접 publish 하지 말 것 — 발행 경로가 둘이 되면 stamp 순서가 뒤집힐 수
+        있고, 파워트레인은 stamp 역행을 영구 latch 로 처벌한다(contract.py 참고).
+        """
+        self._status = status
+
+    def _publish_heartbeat(self):
+        """계약 heartbeat — 현재 상태를 10Hz 로 발행. **유일한 /arm_status 발행 지점.**"""
         msg = ArmStatus()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.mission_id = self.mission_id
-        msg.status = status
+        msg.status = self._status
         self.pub_status.publish(msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ArmFsmNode()
+    # heartbeat 타이머가 _tick(analytic IK 의 FK 블로킹 대기)에 굶지 않도록 멀티스레드.
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
