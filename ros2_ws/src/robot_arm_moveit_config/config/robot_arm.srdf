@@ -32,12 +32,7 @@
     <end_effector name="gripper_a" parent_link="link_051" group="gripper" parent_group="arm"/>
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>
     <!-- 아래 disable_collisions는 새 URDF(58 link)의 모든 joint(fixed 포함)로부터 자동 도출한
-         "Adjacent"(부모-자식) 쌍만 포함 — 프로그램적으로 100% 기계적 도출, 값 조작 없음.
-         이전 SRDF에 있던 "Default"(자세 무관 항상-접촉으로 실측 확인된 쌍, 예: 기어 치합)는
-         새 토폴로지에서 실제 충돌 체크를 다시 안 해봐서 여기 포함하지 않음 — MoveIt Setup
-         Assistant GUI의 "Regenerate Default Collision Matrix"를 반드시 재실행해서 채울 것.
-         (Adjacent만으로는 기어 치합 등 항상-접촉 쌍이 self-collision 오탐으로 남을 수 있음 — 플래닝이
-         부당하게 막히면 우선 이 GUI 작업부터 확인.) -->
+         "Adjacent"(부모-자식) 쌍만 포함 — 프로그램적으로 100% 기계적 도출, 값 조작 없음. -->
     <disable_collisions link1="link_031" link2="link_028" reason="Adjacent"/>
     <disable_collisions link1="link_013" link2="link_015" reason="Adjacent"/>
     <disable_collisions link1="link_017" link2="link_021" reason="Adjacent"/>
@@ -95,4 +90,41 @@
     <disable_collisions link1="link_046" link2="link_048" reason="Adjacent"/>
     <disable_collisions link1="link_047" link2="link_050" reason="Adjacent"/>
     <disable_collisions link1="link_051" link2="link_049" reason="Adjacent"/>
+
+    <!-- 2026-07-16: 위 Adjacent만으로는 기어 치합 등 항상-접촉 쌍이 self-collision 오탐으로
+         남아 mock 플래닝이 홈(all-zero) 자세부터 막혔음(RRTConnect: "Motion planning start
+         tree could not be initialized" / "Start state appears to be in collision") — 실측
+         확인 완료. 정식 MoveIt Setup Assistant GUI("Regenerate Default Collision Matrix")
+         대신, `/check_state_validity` 서비스로 arm_joint_1~5 리밋 안쪽 무작위 자세 40개를
+         샘플링해 매 자세 100% 항상 충돌하는 쌍만 아래에 "Default"로 등록(Setup Assistant가
+         내부적으로 하는 것과 동일한 원리, 샘플 수만 적음 — 디스플레이 없는 환경이라 GUI
+         재실행은 불가했음). 아래 쌍들은 관절각과 무관하게 항상 접촉 → 기어 치합/메쉬 중첩
+         등 기하 아티팩트로 판단, 안전하게 disable.
+         ⚠️ 같은 샘플링에서 자세에 따라 충돌하다 안하다 한 쌍(진짜 self-collision 위험, 절대
+         disable 금지)도 발견됨 — link_002/link_026(39/40), link_034/link_037(36/40),
+         link_041/link_052(36/40), link_045/link_047(33/40), link_034/link_040(31/40),
+         link_044/link_046(14/40), link_043/link_045(10/40), link_041/link_049(3/40).
+         이 쌍들은 그대로 collision-checked 상태로 둠 — 플래닝 중 이 쌍이 원인으로 실패하면
+         실제 충돌 회피가 필요한 자세라는 뜻이니 URDF/메쉬를 먼저 의심할 것.
+         샘플 수(40)가 Setup Assistant 기본값(수천)보다 훨씬 적어 근거가 약함 — 디스플레이
+         있는 환경에서 기회가 되면 GUI로 "Regenerate Default Collision Matrix" 재실행해서
+         이 블록을 정식 결과로 덮어쓸 것. -->
+    <disable_collisions link1="link_001" link2="link_013" reason="Default"/>
+    <disable_collisions link1="link_001" link2="link_015" reason="Default"/>
+    <disable_collisions link1="link_004" link2="link_017" reason="Default"/>
+    <disable_collisions link1="link_005" link2="link_022" reason="Default"/>
+    <disable_collisions link1="link_005" link2="link_024" reason="Default"/>
+    <disable_collisions link1="link_010" link2="link_011" reason="Default"/>
+    <disable_collisions link1="link_010" link2="link_017" reason="Default"/>
+    <disable_collisions link1="link_010" link2="link_025" reason="Default"/>
+    <disable_collisions link1="link_011" link2="link_016" reason="Default"/>
+    <disable_collisions link1="link_011" link2="link_025" reason="Default"/>
+    <disable_collisions link1="link_016" link2="link_020" reason="Default"/>
+    <disable_collisions link1="link_027" link2="link_037" reason="Default"/>
+    <disable_collisions link1="link_028" link2="link_029" reason="Default"/>
+    <disable_collisions link1="link_028" link2="link_030" reason="Default"/>
+    <disable_collisions link1="link_034" link2="link_035" reason="Default"/>
+    <disable_collisions link1="link_035" link2="link_040" reason="Default"/>
+    <disable_collisions link1="link_052" link2="link_054" reason="Default"/>
+    <disable_collisions link1="link_053" link2="link_054" reason="Default"/>
 </robot>
