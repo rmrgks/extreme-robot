@@ -64,16 +64,38 @@
     실제 팔이 안전하게 접히는 각도인지는 실기 검증 전까지 모른다. **실기 테스트 없이
     이 기본값으로 실제 서보를 구동하지 말 것.**
 
+2026-07-15 — 파워트레인 §5.1 잔여 합의 2건 해결(`project_docs/파워트레인_계약_충돌점검.md`
+항목 1·2 대응):
+  - **`_near_stow_posture()` 추가** — `LOCKED`(지형/주행 이벤트로 작업 중단) 경유로 도달한
+    임의 자세를 예전엔 정지만 확인되면 바로 `STOWED_LOCKED`로 근사했음. 이제 관절각이
+    `stow_joint_positions` 근처(`stow_pos_tol_rad`)인지 확인한 경우에만 `STOWED_LOCKED`를
+    발행하고, 아니면 `EXECUTING`을 유지해 파워트레인 쪽 motion hold를 받는다(거짓 주행
+    허가 방지).
+  - **`LOWER_RELEASE` 상태 신설** — `PAYLOAD_ALOFT_STATES`(`LIFT`/`CARRY`, 화물을 든 채
+    공중일 수 있는 상태)에서 `STOW_REQUEST`로 중단되면, 예전엔 바로 `RELEASE`(그리퍼
+    오픈)로 갔는데 이는 화물이 공중에서 그대로 낙하하는 경로였음. 이제 `RELEASE` 전에
+    `lift_height`만큼 먼저 내려(`_lower_pose`/`_lower_target_xyz`, `_carry_pose`/
+    `_lift_target_xyz`의 역) grasp 당시 높이 근처로 되돌아간 뒤에만 그리퍼를 연다.
+  - **controller fault 게이트 추가** — `moveit_dynamixel_bridge`가 Hardware Error
+    Status(주소 70)를 기존 current/position SyncRead 블록에 합쳐 읽어
+    `/dynamixel/controller_fault`(Bool, 내부용 — DDS 경계 안 넘음)로 발행하도록
+    확장. `_is_settled()`가 이 값이 True(등록된 서보 중 하나라도 에러 또는 무응답)
+    이면 즉시 미확인 처리 — 이전엔 이 필드 자체가 없어 검사 불가였던 항목(§5.1
+    잔여 항목 3).
+
 상태 흐름: IDLE → PERCEIVE → PLAN → DESCEND → GRASP_CHECK → LIFT → CARRY
   → (ARRIVED_DROP) RELEASE → STOWING → STOWED_LOCKED → IDLE
   CARRY 중 DROP 감지 → GRIP_LOST(래치) → (재발행 conjunction) PERCEIVE
   PERCEIVE~LIFT 중 지형/주행 이벤트 → LOCKED(래치, 하트비트 유지) → (재발행 conjunction) PERCEIVE
+  LIFT/CARRY(또는 LIFT 중 LOCKED) 중 STOW_REQUEST → LOWER_RELEASE → RELEASE → STOWING
+  그 외 상태 중 STOW_REQUEST → RELEASE → STOWING (이미 grasp 높이 근처라 낙하 낙차 없음)
   LOCKED/GRIP_LOST 모두: 진행 중 모션 취소 + 현재 자세 홀드, MISSION_STOP conjunction으로만 탈출.
 
 ⚠️ 스켈레톤: MoveGroup pose goal / 그리퍼 액션 / effort 판정 / FSM 골격은 구현.
    LIFT·CARRY 목표 pose, 임계값 캘리브, TF 연결은 구현됨. STOWING 모션은 위 참고
    (목표 관절각 실측 필요). CARRYING_LOCKED/STOWED_LOCKED 발행 전 controller fault
-   확인은 브릿지에 해당 필드가 없어 미포함(별도 후속 과제).
+   확인은 `moveit_dynamixel_bridge`의 `/dynamixel/controller_fault`(Hardware Error
+   Status 집계)를 `_is_settled()`에서 게이트로 사용해 구현 완료(2026-07-15).
 """
 from enum import Enum, auto
 
@@ -91,6 +113,7 @@ from tf2_ros import Buffer, TransformListener, TransformException
 from tf2_geometry_msgs import do_transform_pose
 
 from builtin_interfaces.msg import Duration
+from std_msgs.msg import Bool
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -143,6 +166,7 @@ class State(Enum):
     LIFT = auto()
     CARRY = auto()
     GRIP_LOST = auto()
+    LOWER_RELEASE = auto()
     RELEASE = auto()
     STOWING = auto()
     STOWED_LOCKED = auto()
@@ -154,10 +178,17 @@ class State(Enum):
 # 불필요 — 계약 v2 하트비트를 CARRY 자체 루프가 계속 발행해야 하므로 굳이 LOCKED로 빼지 않음.
 PREEMPTIBLE_STATES = (State.PERCEIVE, State.PLAN, State.DESCEND, State.GRASP_CHECK, State.LIFT)
 
-# STOW_REQUEST(운영자 포기·재정렬 유도)로 즉시 RELEASE→STOWING 강제 진입 가능한 상태 —
-# 작업이 진행 중이거나 래치된 모든 상태(2026-07-14 결정: GRIP_LOST 전용이었던 것을 확장).
-# IDLE/RELEASE/STOWING/STOWED_LOCKED는 이미 정지/포기 진행 중이라 대상에서 제외.
+# STOW_REQUEST(운영자 포기·재정렬 유도)로 즉시 RELEASE(or LOWER_RELEASE)→STOWING 강제
+# 진입 가능한 상태 — 작업이 진행 중이거나 래치된 모든 상태(2026-07-14 결정: GRIP_LOST
+# 전용이었던 것을 확장). IDLE/LOWER_RELEASE/RELEASE/STOWING/STOWED_LOCKED는 이미
+# 정지/포기 진행 중이라 대상에서 제외.
 STOW_ABORTABLE_STATES = PREEMPTIBLE_STATES + (State.CARRY, State.GRIP_LOST, State.LOCKED)
+
+# STOW_REQUEST로 중단될 때 화물을 든 채 공중에 있을 수 있는 상태 — 그리퍼를 바로 열면
+# 낙하 위험(파워트레인 §5.1 잔여 합의 ①). 이 상태들에서만 RELEASE 전에 파지 높이까지
+# 먼저 내리는 LOWER_RELEASE를 경유한다. 그 외(PERCEIVE/PLAN/DESCEND/GRASP_CHECK)는 이미
+# grasp 높이 근처라 낙하 낙차가 없어 바로 RELEASE해도 안전.
+PAYLOAD_ALOFT_STATES = (State.LIFT, State.CARRY)
 
 
 class ArmFsmNode(Node):
@@ -210,6 +241,10 @@ class ArmFsmNode(Node):
         # home은 계약상 접힘 자세로 금지(구조상 충돌·역구동 위험) — 실기 검증 전까지 이
         # 기본값으로 실제 서보를 구동하지 말 것. 실측 후 이 파라미터로 덮어쓸 것.
         self.declare_parameter('stow_joint_positions', [0.0, -0.6, 1.2])
+        # STOWED_LOCKED 발행 전 "실제로 접힌 자세인지" 확인용 관절각 허용오차 — §5.1 잔여
+        # 합의 ②(정지 안정성만 검사하고 접힘 자세 근접은 미확인) 대응. LOCKED 경유(지형/주행
+        # 이벤트로 작업 중단)로 도달한 임의 자세를 STOWED_LOCKED로 착칭하지 않기 위함.
+        self.declare_parameter('stow_pos_tol_rad', 0.1)   # [rad] ≈5.7도, placeholder
 
         g = self.get_parameter
         self.planning_group = g('planning_group').value
@@ -237,6 +272,7 @@ class ArmFsmNode(Node):
         self.locked_pos_tol = g('locked_pos_tol').value
         self.locked_vel_tol = g('locked_vel_tol').value
         self.locked_dwell = g('locked_dwell').value
+        self.stow_pos_tol_rad = g('stow_pos_tol_rad').value
         self.stow_joint_positions = list(g('stow_joint_positions').value)
         if len(self.stow_joint_positions) != len(ARM_JOINT_NAMES):
             self.get_logger().error(
@@ -256,6 +292,11 @@ class ArmFsmNode(Node):
         self.create_subscription(ArrivalStatus, '/arrival_status', self._on_arrival, ARRIVAL_QOS)
         self.create_subscription(ChassisMode, '/chassis_mode', self._on_chassis_mode, HEARTBEAT_QOS)
         self.create_subscription(JointState, '/joint_states', self._on_joint_states, 10)
+        # 계약 §5.1 "locked heartbeat는 ... controller fault 0 ... 을 실제 확인한다" —
+        # moveit_dynamixel_bridge가 Hardware Error Status를 집계해 발행(내부용 토픽,
+        # 파워트레인 DDS 경계를 넘지 않음). _is_settled()에서 게이트로 사용.
+        self.create_subscription(Bool, '/dynamixel/controller_fault',
+                                  self._on_controller_fault, 10)
 
         self.pub_status = self.create_publisher(ArmStatus, '/arm_status', HEARTBEAT_QOS)
 
@@ -287,6 +328,9 @@ class ArmFsmNode(Node):
         self.pick_target = None
         self.mission_id = 0
         self._joint_effort = {}            # joint_name -> effort
+        # 브릿지 controller fault 게이트 — 첫 샘플 받기 전엔 알 수 없으니 보수적으로 True
+        # (TF 미가용 시 _is_settled()가 False를 리턴하는 것과 같은 안전 측 기본값).
+        self._controller_fault = True
         # 계약 v2 — MISSION_STOP + ArrivalStatus conjunction 게이트 (순서 무관)
         self._mission_stop_active = False
         self._pending_arrival = None        # 아직 소비 안 한 최신 ArrivalStatus
@@ -363,9 +407,14 @@ class ArmFsmNode(Node):
         elif msg.mode == MODE_STOW_REQUEST and self.state in STOW_ABORTABLE_STATES:
             # 운영자 포기/재정렬 유도 — 진행 중인 작업(또는 GRIP_LOST/LOCKED 래치) 중단하고
             # 접어 잠금. 2026-07-14: GRIP_LOST 전용이었던 범위를 작업 중 모든 상태로 확장.
+            # 화물을 든 채 공중일 수 있으면(PAYLOAD_ALOFT_STATES, 또는 LIFT 중 LOCKED로
+            # 중단된 경우) 그리퍼를 바로 열지 않고 LOWER_RELEASE로 먼저 내린다 — §5.1
+            # 잔여 합의 ①(무조건 RELEASE 전이 = 화물 낙하 경로) 대응.
+            aloft = (self.state in PAYLOAD_ALOFT_STATES
+                     or (self.state == State.LOCKED and self._prev_state == State.LIFT))
             self._cancel_arm_motion()
             self.locked = False
-            self._transition(State.RELEASE)
+            self._transition(State.LOWER_RELEASE if aloft else State.RELEASE)
 
         self._try_advance()
 
@@ -429,6 +478,9 @@ class ArmFsmNode(Node):
             if i < len(msg.position):
                 self._joint_position[name] = msg.position[i]
 
+    def _on_controller_fault(self, msg):
+        self._controller_fault = bool(msg.data)
+
     # ── FSM tick ───────────────────────────────
 
     def _tick(self):
@@ -456,8 +508,13 @@ class ArmFsmNode(Node):
         tip pose(TF, base_frame←tip_link)가 연속 tick 사이 `locked_pos_tol` 이내로
         유지되고, 관절각 유한차분 속도가 `locked_vel_tol` 이내인 상태가 `locked_dwell`
         초 이상 지속돼야 True. TF 조회 실패·불안정 감지 시 dwell 타이머 리셋(안전 측
-        기본값 = 미확인). ⚠️ 컨트롤러 fault 확인은 브릿지에 아직 해당 필드가 없어 미포함.
+        기본값 = 미확인). controller fault(`/dynamixel/controller_fault`, 브릿지가
+        Hardware Error Status 집계) 가 True 이면 즉시 미확인 처리(2026-07-15 추가 —
+        이전엔 브릿지에 해당 필드가 없어 미포함이었음).
         """
+        if self._controller_fault:
+            self._settle_start = None
+            return False
         try:
             tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_link, Time())
         except TransformException:
@@ -602,6 +659,65 @@ class ArmFsmNode(Node):
         """
         self._set_status(ARM_GRIP_LOST)
 
+    def _do_lower_release(self):
+        """RELEASE(그리퍼 오픈) 전에 파지 높이까지 내린다 — 화물 낙하 방지(§5.1 잔여 합의 ①).
+
+        `PAYLOAD_ALOFT_STATES`(LIFT/CARRY)에서 STOW_REQUEST로 중단됐을 때만 경유.
+        `_carry_pose`/`_lift_target_xyz`가 더한 `lift_height`만큼 되돌려 내려
+        grasp 당시 높이 근처로 되돌아간 뒤에만 RELEASE로 넘어간다. TF/IK 실패 시엔
+        무한정 대기하지 않고 바로 RELEASE(기존 동작, 낙하 위험을 감수)로 폴백한다 —
+        높이를 못 낮추는 것보다 그리퍼를 계속 닫아 매달아두는 쪽이 더 위험할 수 있다.
+        """
+        self._set_status(ARM_EXECUTING)
+        if self._motion_state == 'active':
+            return
+        if self._motion_state == 'done':
+            self._motion_state = 'idle'
+            self._transition(State.RELEASE)
+            return
+
+        if self.ik_mode == 'moveit':
+            pose = self._lower_pose()
+            if pose is None:
+                self.get_logger().warn('lower pose 계산 실패 — 바로 RELEASE(낙하 위험 감수)')
+                self._transition(State.RELEASE)
+                return
+            self._begin_arm_move(pose)
+            return
+
+        target = self._lower_target_xyz()
+        if target is None or not self._move_to_xyz(target):
+            self.get_logger().warn('내림 이동 실패 — 바로 RELEASE(낙하 위험 감수)')
+            self._transition(State.RELEASE)
+
+    def _lower_pose(self):
+        """현재 TCP(tip_link)를 base_link 기준 -Z(lift_height만큼) 내린 자세. `_carry_pose` 역."""
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_link, Time())
+        except TransformException as e:
+            self.get_logger().warn(
+                f'lower_pose TF 조회 실패 ({self.base_frame} <- {self.tip_link}): {e}')
+            return None
+        ps = PoseStamped()
+        ps.header.frame_id = self.base_frame
+        ps.header.stamp = self.get_clock().now().to_msg()
+        t = tf.transform.translation
+        ps.pose.position.x = t.x
+        ps.pose.position.y = t.y
+        ps.pose.position.z = max(0.0, t.z - self.lift_height)
+        ps.pose.orientation = tf.transform.rotation
+        return ps
+
+    def _lower_target_xyz(self):
+        """현재 tip 위치(base_frame)에서 -Z lift_height 만큼 내린 목표. `_lift_target_xyz` 역."""
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_link, Time())
+        except TransformException as e:
+            self.get_logger().warn(f'lower target TF 조회 실패: {e}')
+            return None
+        t = tf.transform.translation
+        return (t.x, t.y, max(0.0, t.z - self.lift_height))
+
     def _do_release(self):
         self._set_status(ARM_EXECUTING)
         if not self._grip_sent:
@@ -649,15 +765,38 @@ class ArmFsmNode(Node):
         """현재 자세 홀드: MoveIt에 새 goal 안 보냄 → 브릿지가 torque로 마지막 위치 유지.
 
         계약 v2 10Hz 하트비트 요구 — LOCKED 중에도 발행을 멈추면 안 됨. `_is_settled()`
-        충족 전엔 `EXECUTING`(아직 정지 미확인), 충족 후엔 `_prev_state==LIFT`
-        (GRASP_CHECK에서 파지 확정된 뒤)면 `CARRYING_LOCKED`, 그 외(PERCEIVE/PLAN/DESCEND/
-        GRASP_CHECK 중단)는 `STOWED_LOCKED`로 근사.
+        충족 전엔 `EXECUTING`(아직 정지 미확인). 충족 후 `_prev_state==LIFT`(파지 확정 뒤
+        중단, 화물을 든 상태)면 `CARRYING_LOCKED`.
+
+        그 외(PERCEIVE/PLAN/DESCEND/GRASP_CHECK 중단, 빈손)는 예전엔 정지만 확인되면
+        바로 `STOWED_LOCKED`로 근사했으나, LOCKED는 새 goal을 안 보내(모션 없이 그 자리에서
+        홀드) 실제로는 임의의 안 접힌 자세일 수 있다 — 파워트레인은 `STOWED_LOCKED`를
+        "차가 출발해도 되는" 근거로 그대로 신뢰하므로 이는 안전 gap이었다(§5.1 잔여 합의 ②).
+        `_near_stow_posture()`로 관절각이 실제 `stow_joint_positions` 근처인지 확인한
+        경우에만 `STOWED_LOCKED`를 발행하고, 아니면 정직하게 `EXECUTING`을 유지해 파워트레인
+        쪽 motion hold를 받는다(거짓 주행 허가보다 안전).
         """
         if not self._is_settled():
             self._set_status(ARM_EXECUTING)
             return
-        carrying = (self._prev_state == State.LIFT)
-        self._set_status(ARM_CARRYING_LOCKED if carrying else ARM_STOWED_LOCKED)
+        if self._prev_state == State.LIFT:
+            self._set_status(ARM_CARRYING_LOCKED)
+            return
+        self._set_status(ARM_STOWED_LOCKED if self._near_stow_posture() else ARM_EXECUTING)
+
+    def _near_stow_posture(self):
+        """현재 관절각이 `stow_joint_positions` 근처(±`stow_pos_tol_rad`)인지 확인.
+
+        `stow_joint_positions`가 비활성(파라미터 길이 오류)이면 검증 불가하므로 기존
+        동작(정지만 확인)으로 폴백한다 — 이미 그 경우엔 시작 시점에 에러 로그를 남긴다.
+        """
+        if self.stow_joint_positions is None:
+            return True
+        for name, target in zip(ARM_JOINT_NAMES, self.stow_joint_positions):
+            cur = self._joint_position.get(name)
+            if cur is None or abs(cur - target) > self.stow_pos_tol_rad:
+                return False
+        return True
 
     # ── MoveIt 팔 모션 ─────────────────────────
 

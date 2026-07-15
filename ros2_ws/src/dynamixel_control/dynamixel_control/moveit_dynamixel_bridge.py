@@ -7,24 +7,29 @@ from rclpy.node import Node
 from rclpy.action import ActionServer, GoalResponse, CancelResponse
 from trajectory_msgs.msg import JointTrajectory
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
 from control_msgs.action import FollowJointTrajectory
 from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite, GroupSyncRead
 
 
 ADDR_TORQUE_ENABLE = 64
+ADDR_HARDWARE_ERROR_STATUS = 70
 ADDR_GOAL_POSITION = 116
 ADDR_PRESENT_CURRENT = 126
 ADDR_PRESENT_POSITION = 132
 
 LEN_GOAL_POSITION = 4
+LEN_HARDWARE_ERROR_STATUS = 1
 LEN_PRESENT_CURRENT = 2
 LEN_PRESENT_POSITION = 4
 
-# PRESENT_CURRENT(126,2) ~ PRESENT_POSITION(132,4) 은 X-시리즈 컨트롤 테이블에서 연속 →
-# 126부터 10바이트를 한 번의 SyncRead 로 받아 current/position 을 함께 추출(버스 트랜잭션 1회).
+# HARDWARE_ERROR_STATUS(70,1) ~ PRESENT_POSITION(132,4) 은 X-시리즈 컨트롤 테이블에서
+# 연속 주소 범위라, 70부터 66바이트를 한 번의 SyncRead 로 받아 fault/current/position 을
+# 함께 추출(버스 트랜잭션 1회). 중간의 다른 필드(Profile Accel/Velocity 등)도 같이
+# 읽히지만 안 쓰고 버림 — 주소가 연속이기만 하면 여분을 읽는 건 무해함.
 # (XL430/XC430/XM 계열 공통. 다른 모델이면 주소 재확인 필요 — CLAUDE.md §8 모터모델 미확정.)
-ADDR_SYNC_READ_START = ADDR_PRESENT_CURRENT
-LEN_SYNC_READ = (ADDR_PRESENT_POSITION + LEN_PRESENT_POSITION) - ADDR_PRESENT_CURRENT  # = 10
+ADDR_SYNC_READ_START = ADDR_HARDWARE_ERROR_STATUS
+LEN_SYNC_READ = (ADDR_PRESENT_POSITION + LEN_PRESENT_POSITION) - ADDR_HARDWARE_ERROR_STATUS  # = 66
 
 TORQUE_ENABLE = 1
 TORQUE_DISABLE = 0
@@ -99,15 +104,22 @@ class MoveItDynamixelBridge(Node):
             LEN_SYNC_READ,
         )
 
+        # 토크 ON에 성공해 SyncRead 에 실제로 등록된 ID만 추적 — 이후 매 tick 이 ID들의
+        # 응답 유무/Hardware Error Status 로 controller fault 를 판정한다(등록 안 된 ID는
+        # 애초에 버스에 없거나 비활성화된 것으로 간주해 fault 판정에서 제외).
+        self.active_ids = set()
+
         # 팔 서보: 토크 ON 성공한 ID만 SyncRead 등록
         for joint_name, config in JOINT_CONFIG.items():
             if self._enable_torque(config["id"], joint_name):
                 self.group_sync_read.addParam(config["id"])
+                self.active_ids.add(config["id"])
 
         # 그리퍼 서보: 토크 ON 성공한 ID만 SyncRead 등록
         for gid in self.gripper_ids:
             if self._enable_torque(gid, f"gripper(id {gid})"):
                 self.group_sync_read.addParam(gid)
+                self.active_ids.add(gid)
 
         self.trajectory_sub = self.create_subscription(
             JointTrajectory,
@@ -138,6 +150,15 @@ class MoveItDynamixelBridge(Node):
         self.joint_state_pub = self.create_publisher(
             JointState,
             "/joint_states",
+            10,
+        )
+
+        # 계약 §5.1 "locked heartbeat는 ... controller fault 0 ... 을 실제 확인한다" 대응.
+        # arm_fsm 이 CARRYING_LOCKED/STOWED_LOCKED 발행 전 게이트로 구독(내부용 — 파워트레인
+        # 쪽 DDS 경계를 넘지 않음, robot_arm_msgs 계약과 무관).
+        self.fault_pub = self.create_publisher(
+            Bool,
+            "/dynamixel/controller_fault",
             10,
         )
 
@@ -307,23 +328,38 @@ class MoveItDynamixelBridge(Node):
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
 
+        # controller fault 집계 — SyncRead 에 등록된(토크 ON 성공) ID 중 하나라도
+        # Hardware Error Status != 0 이거나 이번 tick 응답이 없으면 fault=True.
+        # 응답 없음도 fault 로 보는 이유: 활성 등록된 서보가 갑자기 무응답이면 버스/전원
+        # 이상일 수 있어 "정상"으로 오인하면 안 됨(안전 측 기본값).
+        fault = False
+
         # 팔 관절: position(rad) + effort(raw current, signed)
         for joint_name, config in JOINT_CONFIG.items():
             dxl_id = config["id"]
+            if dxl_id not in self.active_ids:
+                continue
             sample = self._read_sample(dxl_id)
             if sample is None:
+                fault = True
                 continue
-            current_raw, tick = sample
+            current_raw, tick, hw_error = sample
+            if hw_error != 0:
+                fault = True
             msg.name.append(joint_name)
             msg.position.append(self.tick_to_rad(joint_name, tick))
             msg.effort.append(float(current_raw))
 
         # 그리퍼 핑거 관절: 단일 서보(gripper_ids[0]) 값을 양 핑거에 동일 보고.
         # position(m) + effort(raw current) — FSM 이 effort 로 파지/DROP 판정.
-        if self.gripper_ids:
+        if self.gripper_ids and self.gripper_ids[0] in self.active_ids:
             sample = self._read_sample(self.gripper_ids[0])
-            if sample is not None:
-                current_raw, tick = sample
+            if sample is None:
+                fault = True
+            else:
+                current_raw, tick, hw_error = sample
+                if hw_error != 0:
+                    fault = True
                 finger_m = self.gripper_tick_to_m(tick)
                 for jn in self.gripper_joints:
                     msg.name.append(jn)
@@ -331,19 +367,28 @@ class MoveItDynamixelBridge(Node):
                     msg.effort.append(float(current_raw))
 
         self.joint_state_pub.publish(msg)
+        self.fault_pub.publish(Bool(data=fault))
 
     def _read_sample(self, dxl_id):
-        """SyncRead 블록에서 (signed current, position tick) 추출. 미수신 시 None."""
+        """SyncRead 블록에서 (signed current, position tick, hardware_error_status) 추출.
+
+        미수신 시 None.
+        """
+        if not self.group_sync_read.isAvailable(
+                dxl_id, ADDR_HARDWARE_ERROR_STATUS, LEN_HARDWARE_ERROR_STATUS):
+            return None
         if not self.group_sync_read.isAvailable(dxl_id, ADDR_PRESENT_CURRENT, LEN_PRESENT_CURRENT):
             return None
         if not self.group_sync_read.isAvailable(dxl_id, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION):
             return None
+        hw_error = self.group_sync_read.getData(
+            dxl_id, ADDR_HARDWARE_ERROR_STATUS, LEN_HARDWARE_ERROR_STATUS)
         current_raw = to_signed(
             self.group_sync_read.getData(dxl_id, ADDR_PRESENT_CURRENT, LEN_PRESENT_CURRENT),
             LEN_PRESENT_CURRENT,
         )
         tick = self.group_sync_read.getData(dxl_id, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION)
-        return current_raw, tick
+        return current_raw, tick, hw_error
 
     def destroy_node(self):
         for config in JOINT_CONFIG.values():
