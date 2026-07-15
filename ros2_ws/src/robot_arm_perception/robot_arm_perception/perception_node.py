@@ -16,6 +16,20 @@ camera_mode 파라미터:
   realsense  실제 RealSense D435i (기본값) — depth 기반 translation 활성
   test       test_image_path 정지 이미지 반복 (하드웨어 없이 검증) — translation 0,
              orientation(2D PCA)만 채워짐
+
+2026-07-13 파워트레인 "계약 v2"(Notion `2026 국방로봇 자율주행 SW 전체 개발계획` §3.2/§15) 반영:
+D435i는 로봇팔 전용 camera owner — 원격 조종용 raw 영상은 YOLO 추론·구독자 유무를
+기다리면 안 됨("raw sender는 YOLO/debug image를 기다리지 않는다"). `/perception/raw_image`를
+YOLO 추론과 무관하게 발행한다(`stream_node`가 SRT :5002로 송출). 기존 `/perception/debug_image`
+(오버레이, 구독자 있을 때만)는 로컬 디버그용으로 그대로 둠.
+
+2026-07-15: "구독자 게이트 없음"만으로는 YOLO 추론이 느려지면 raw_image 발행 주기까지 같이
+밀리는 문제가 있어(같은 스레드에서 캡처→추론→발행 순차 실행), 캡처 스레드(`_capture_loop`)/
+추론 스레드(`_inference_loop`)로 분리. 캡처는 프레임을 받는 즉시(추론과 무관하게) raw_image를
+발행하고 최신 프레임 1장만 락으로 보호된 공유 슬롯에 남기며, 추론은 그 최신 프레임만
+시퀀스 번호로 소비(지연 큐 누적 없음). 같은 세션에서 RealSense 멀티 디바이스 오인식 방지용
+`D435_SERIAL` 하드코딩과, depth_frame은 있는데 depth_img가 없을 때 deproject를 호출하던
+버그도 수정.
 """
 import math
 import os
@@ -34,6 +48,7 @@ from sensor_msgs.msg import RegionOfInterest, Image as ImageMsg
 from cv_bridge import CvBridge
 from robot_arm_msgs.msg import DetectedObject, DetectedObjectArray
 
+D435_SERIAL = "250222071245"
 
 # ──────────────────────────────────────────────
 # TensorRT 엔진 캐시 (yolo_depth_3d.py resolve_model 포팅)
@@ -192,12 +207,19 @@ class PerceptionNode(Node):
         self.pub_pick = self.create_publisher(
             DetectedObject, '/pick_target', latched_qos)
         self.pub_debug = self.create_publisher(ImageMsg, '/perception/debug_image', 1)
+        # YOLO/오버레이와 무관한 raw 스트림 — 캡처 스레드가 매 프레임 발행(§3.2)
+        self.pub_raw = self.create_publisher(ImageMsg, '/perception/raw_image', 1)
         self._bridge = CvBridge()
 
-        # 추론 루프 스레드
+        # 캡처 스레드는 카메라를 전담하며 추론을 기다리지 않는다. 추론 스레드는
+        # 공유 슬롯의 최신 프레임 1장만 소비하므로 지연 큐가 쌓이지 않는다.
         self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        self._latest_lock = threading.Lock()
+        self._latest_frame = None
+        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self._capture_thread.start()
+        self._inference_thread.start()
 
     # ── 카메라 초기화 ──────────────────────────
 
@@ -207,6 +229,7 @@ class PerceptionNode(Node):
             self._rs = rs
             pipe = rs.pipeline()
             cfg = rs.config()
+            cfg.enable_device(D435_SERIAL)
             cfg.enable_stream(rs.stream.depth, self._w, self._h, rs.format.z16, self._fps)
             cfg.enable_stream(rs.stream.color, self._w, self._h, rs.format.bgr8, self._fps)
             profile = pipe.start(cfg)
@@ -246,90 +269,104 @@ class PerceptionNode(Node):
                 self.get_logger().warn(f'Unknown class "{name}" — 무시')
         return ids or None
 
-    # ── 추론 루프 ──────────────────────────────
+    # ── capture / latest-only 추론 ──────────────────────────────
 
-    def _loop(self):
-        idx = 0
+    def _capture_loop(self):
+        """카메라 전담 — 프레임을 받는 즉시 raw_image 발행, 최신 프레임만 공유 슬롯에 남김."""
+        sequence = 0
         interval = 1.0 / self._fps
+        frame_id = self.get_parameter('frame_id').value
 
         while self._running and rclpy.ok():
             t0 = time.time()
-
             color_img, depth_frame, depth_img = self._grab_frame()
             if color_img is None:
                 time.sleep(0.01)
                 continue
 
-            conf = self.get_parameter('conf_threshold').value
-            cls_filter = self._get_cls_filter()
-            frame_id = self.get_parameter('frame_id').value
+            stamp = self.get_clock().now().to_msg()
+            raw = self._bridge.cv2_to_imgmsg(color_img, encoding='bgr8')
+            raw.header.stamp = stamp
+            raw.header.frame_id = frame_id
+            self.pub_raw.publish(raw)
 
-            # ① YOLO segmentation 추론
-            results = self.model.predict(
-                color_img, conf=conf, classes=cls_filter, verbose=False)
-            r0 = results[0]
-            masks = None if r0.masks is None else r0.masks.data.cpu().numpy()
-
-            array_msg = DetectedObjectArray()
-            array_msg.header.stamp = self.get_clock().now().to_msg()
-            array_msg.header.frame_id = frame_id
-
-            for i, box in enumerate(r0.boxes):
-                x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
-
-                obj = DetectedObject()
-                obj.class_id = int(box.cls[0])
-                obj.class_name = self.model.names[obj.class_id]
-                obj.confidence = float(box.conf[0])
-                obj.pose = Pose()  # 기본값(position 0)
-                obj.pose.orientation.w = 1.0  # 유효 단위 쿼터니언
-
-                roi = RegionOfInterest()
-                roi.x_offset = x1
-                roi.y_offset = y1
-                roi.width = x2 - x1
-                roi.height = y2 - y1
-                obj.bbox = roi
-
-                # ② markerless pose: 마스크 기반 translation(depth) + orientation(2D PCA)
-                binmask = self._get_binmask(masks, i, color_img, (x1, y1, x2, y2))
-                self._fill_markerless_pose(
-                    obj, binmask, (x1, y1, x2, y2), depth_frame, depth_img)
-
-                array_msg.objects.append(obj)
-
-            self.pub_objects.publish(array_msg)
-
-            # ③ 픽 대상 선별 → /pick_target (후보 없으면 publish 안 함 = latched 유지)
-            pick = self._select_pick_target(array_msg.objects)
-            if pick is not None:
-                self.pub_pick.publish(pick)
-
-            # ④ debug 이미지 발행
-            if self.pub_debug.get_subscription_count() > 0:
-                debug_img = self._draw_debug(color_img.copy(), array_msg.objects, masks, pick)
-                self.pub_debug.publish(
-                    self._bridge.cv2_to_imgmsg(debug_img, encoding='bgr8'))
-
-            if idx % 30 == 0:
-                if array_msg.objects:
-                    summary = ', '.join(
-                        f'{o.class_name}({o.confidence:.2f})'
-                        f'{"[posed]" if o.pose.position.z != 0.0 else ""}'
-                        for o in array_msg.objects
-                    )
-                    pick_str = (f' | pick={pick.class_name}({pick.confidence:.2f})'
-                                if pick is not None else '')
-                    self.get_logger().info(
-                        f'[{idx}] {len(array_msg.objects)} objects: {summary}{pick_str}')
-                else:
-                    self.get_logger().info(f'[{idx}] (검출 없음)')
-            idx += 1
+            # RealSense SDK 프레임 객체는 스레드 간 공유가 안전하지 않음 — keep()으로
+            # 버퍼를 유지한 채 참조만 공유 슬롯에 넘긴다(색상/깊이 배열은 복사).
+            if depth_frame is not None:
+                depth_frame.keep()
+            with self._latest_lock:
+                sequence += 1
+                self._latest_frame = (sequence, stamp, color_img.copy(), depth_frame,
+                                      None if depth_img is None else depth_img.copy())
 
             if self._camera_mode == 'test':
                 elapsed = time.time() - t0
                 if interval - elapsed > 0:
                     time.sleep(interval - elapsed)
+
+    def _inference_loop(self):
+        """공유 슬롯의 최신 프레임만 소비 — 지연 프레임 큐가 쌓이지 않는다."""
+        last_sequence = -1
+        while self._running and rclpy.ok():
+            with self._latest_lock:
+                frame = self._latest_frame
+            if frame is None or frame[0] == last_sequence:
+                time.sleep(0.002)
+                continue
+            last_sequence, stamp, color_img, depth_frame, depth_img = frame
+            self._publish_detections(color_img, depth_frame, depth_img, stamp)
+
+    def _publish_detections(self, color_img, depth_frame, depth_img, stamp):
+        conf = self.get_parameter('conf_threshold').value
+        cls_filter = self._get_cls_filter()
+        frame_id = self.get_parameter('frame_id').value
+
+        # ① YOLO segmentation 추론
+        results = self.model.predict(
+            color_img, conf=conf, classes=cls_filter, verbose=False)
+        r0 = results[0]
+        masks = None if r0.masks is None else r0.masks.data.cpu().numpy()
+
+        array_msg = DetectedObjectArray()
+        array_msg.header.stamp = stamp
+        array_msg.header.frame_id = frame_id
+
+        for i, box in enumerate(r0.boxes):
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+
+            obj = DetectedObject()
+            obj.class_id = int(box.cls[0])
+            obj.class_name = self.model.names[obj.class_id]
+            obj.confidence = float(box.conf[0])
+            obj.pose = Pose()  # 기본값(position 0)
+            obj.pose.orientation.w = 1.0  # 유효 단위 쿼터니언
+
+            roi = RegionOfInterest()
+            roi.x_offset = x1
+            roi.y_offset = y1
+            roi.width = x2 - x1
+            roi.height = y2 - y1
+            obj.bbox = roi
+
+            # ② markerless pose: 마스크 기반 translation(depth) + orientation(2D PCA)
+            binmask = self._get_binmask(masks, i, color_img, (x1, y1, x2, y2))
+            self._fill_markerless_pose(
+                obj, binmask, (x1, y1, x2, y2), depth_frame, depth_img)
+
+            array_msg.objects.append(obj)
+
+        self.pub_objects.publish(array_msg)
+
+        # ③ 픽 대상 선별 → /pick_target (후보 없으면 publish 안 함 = latched 유지)
+        pick = self._select_pick_target(array_msg.objects)
+        if pick is not None:
+            self.pub_pick.publish(pick)
+
+        # ④ debug 이미지 발행
+        if self.pub_debug.get_subscription_count() > 0:
+            debug_img = self._draw_debug(color_img.copy(), array_msg.objects, masks, pick)
+            self.pub_debug.publish(
+                self._bridge.cv2_to_imgmsg(debug_img, encoding='bgr8'))
 
     def _select_pick_target(self, objects):
         """픽 후보 중 confidence 최고 1개 선택.
@@ -413,7 +450,7 @@ class PerceptionNode(Node):
             cu, cv_ = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
         # translation: realsense 모드에서만 (depth 필요)
-        if depth_frame is None or self._depth_cal is None:
+        if depth_frame is None or depth_img is None or self._depth_cal is None:
             return
         r = max(4, min(x2 - x1, y2 - y1) // 6)
         xyz = _deproject_centroid(
@@ -493,7 +530,8 @@ class PerceptionNode(Node):
 
     def destroy_node(self):
         self._running = False
-        self._thread.join(timeout=2.0)
+        self._capture_thread.join(timeout=2.0)
+        self._inference_thread.join(timeout=2.0)
         if self._pipe is not None:
             self._pipe.stop()
         super().destroy_node()

@@ -15,12 +15,65 @@
     2) 그리퍼 관절 + `gripper_controller` 실행 경로를 브릿지/컨트롤러에 추가해야 함.
     3) 카메라 frame → planning frame(base_link) **TF**가 있어야 MoveIt이 목표를 변환.
 
-상태 흐름(§4): IDLE → PERCEIVE → PLAN → DESCEND → GRASP_CHECK → LIFT → CARRY
-  → (ARRIVED_DROP) RELEASE → DONE → IDLE / CARRY 중 DROP → REGRASP → (한계초과) ABORT
-  LOCKED: 거친지형/추종 모드 → 진행 중 모션 취소 + 현재 자세 홀드.
+2026-07-13 파워트레인 "계약 v2"(Notion `2026 국방로봇 자율주행 SW 전체 개발계획` §5.1/5.2)
+반영 — status/mode 문자열과 트리거 조건을 아래처럼 갱신:
+  - 작업 개시/하역 모두 **`/chassis_mode == MISSION_STOP` AND 같은 mission_id의
+    `/arrival_status`** 를 순서 무관하게 둘 다 받아야 전이(`_try_advance`). 미인식
+    mode·stale/미래/역행 stamp는 default-deny(상태 변경 없음).
+  - `DONE`은 더 이상 완료 권위가 아님 — 픽업 완료는 `CARRYING_LOCKED`, 하역 완료는
+    `STOWED_LOCKED`가 최종 권위. `RELEASE` 뒤 `STOWING` 경유해서 `STOWED_LOCKED` 도달.
+  - `CARRY` 중 DROP 감지 시 기존 자동 재파지 루프(REGRASP↔PERCEIVE) 대신 `GRIP_LOST`로
+    **완전 래치**(자동 재시도 없음) — 새 MISSION_STOP+ArrivalStatus(ARRIVED_PICKUP,
+    같은 mission_id 재발행 가능) conjunction이 다시 와야만 PERCEIVE 재진입.
+  - `STOW_REQUEST` mode 수신 시 진행 중인 작업을 강제로 RELEASE→STOWING 경로로 유도.
+  - mission_id 멱등성: 이미 `STOWED_LOCKED`까지 완료한 mission_id의 ArrivalStatus
+    재수신은 무시(중복 재실행 방지).
+
+2026-07-14 자체 결정(우리 쪽에서 결정 가능한 항목은 회의 전에 확정·구현):
+  - **`STOW_REQUEST` 범위 확장**: `GRIP_LOST` 전용이었던 것을 `STOW_ABORTABLE_STATES`
+    (진행 중인 모든 작업 상태 + `CARRY` + `LOCKED`)로 확장.
+  - **`WORK_READY` vs `STOWED_LOCKED` 역할 확정**: `WORK_READY`=MISSION_STOP+ArrivalStatus
+    conjunction 수락 순간의 1회성 ack, `STOWED_LOCKED`=그 외 평상시(빈손) 상시 하트비트.
+  - **`_is_settled()`**: locked 하트비트(`CARRYING_LOCKED`/`STOWED_LOCKED`) 발행 전 실제
+    확인 — TF(`base_frame`←`tip_link`) tip 위치가 `locked_pos_tol` 이내로 안정되고,
+    관절각 유한차분 속도가 `locked_vel_tol` 이내인 상태가 `locked_dwell`초 이상
+    지속돼야 True. 브릿지가 `/joint_states`에 velocity를 안 실어도 위치 유한차분으로
+    자체 계산하므로 문제 없음.
+
+2026-07-15 — origin/main 재합류 + 실제 STOWING 모션 구현:
+  - PR #17("파워트레인 DDS 통신 복구 + arm_status 10Hz heartbeat")이 이 파일을 이
+    브랜치와 무관하게 독립적으로 다시 손대(계약 v2 상태/게이트 로직 없는 이전 버전 위에
+    `contract.py`/`qos_profiles.py` 단일 출처 + heartbeat 전용 타이머·MultiThreadedExecutor
+    를 추가) `main`에 먼저 병합됨. 이 세션에서 그 인프라(heartbeat 아키텍처·QoS·contract
+    상수 단일 출처) 위에 위 계약 v2 FSM 로직(conjunction 게이트·GRIP_LOST 래치·
+    STOW_ABORTABLE_STATES·`_is_settled()`)을 재적용.
+  - **LOCK_MODES를 `contract.py` 것으로 통일**(기존엔 이 파일이 로컬로 `DRIVING`을 제외한
+    부분집합을 따로 들고 있었음) — `contract.py`(파워트레인 contract.py와 짝, 단일 출처)는
+    `DRIVING`도 LOCK_MODES에 포함한다. 즉 PERCEIVE~LIFT 중 `DRIVING` 수신 시에도 이제
+    `_enter_locked()`가 걸린다("MISSION_STOP만 허가, 나머지 전부 잠금"을 문자 그대로 적용).
+    LOCKED 상태에서 `DRIVING`으로 자동 언락되는 옛 버그(PR #17이 미수정으로 지적)는
+    애초에 이 파일에 그런 분기가 없으므로 해당 없음 — `_try_advance()`의
+    MISSION_STOP+ArrivalStatus conjunction으로만 탈출.
+  - **`STOWING` 실제 접이 모션 구현**(`_begin_stow_move`) — 이전까지는 스켈레톤이라 현재
+    자세 그대로 `_is_settled()`만 확인했음(모션 자체가 없어 접힘 자세 검증이 아니라
+    "멈춰있나" 검증에 불과했음). 이제 `stow_joint_positions` 파라미터가 정의하는 목표
+    관절각으로 `/arm_controller/joint_trajectory`에 직접 궤적을 발행 → 완료 후 `_is_settled()`
+    게이트를 거쳐 `STOWED_LOCKED`.
+    ⚠️ **`stow_joint_positions` 기본값은 CAD 미검증 placeholder다.** 계약상 all-zero
+    home을 접힘 자세로 쓰는 것은 금지(PR #17 회신) — 그래서 0이 아닌 임의값을 넣어뒀지만
+    실제 팔이 안전하게 접히는 각도인지는 실기 검증 전까지 모른다. **실기 테스트 없이
+    이 기본값으로 실제 서보를 구동하지 말 것.**
+
+상태 흐름: IDLE → PERCEIVE → PLAN → DESCEND → GRASP_CHECK → LIFT → CARRY
+  → (ARRIVED_DROP) RELEASE → STOWING → STOWED_LOCKED → IDLE
+  CARRY 중 DROP 감지 → GRIP_LOST(래치) → (재발행 conjunction) PERCEIVE
+  PERCEIVE~LIFT 중 지형/주행 이벤트 → LOCKED(래치, 하트비트 유지) → (재발행 conjunction) PERCEIVE
+  LOCKED/GRIP_LOST 모두: 진행 중 모션 취소 + 현재 자세 홀드, MISSION_STOP conjunction으로만 탈출.
 
 ⚠️ 스켈레톤: MoveGroup pose goal / 그리퍼 액션 / effort 판정 / FSM 골격은 구현.
-   LIFT·CARRY 목표 pose, 임계값 캘리브, TF 연결은 TODO.
+   LIFT·CARRY 목표 pose, 임계값 캘리브, TF 연결은 구현됨. STOWING 모션은 위 참고
+   (목표 관절각 실측 필요). CARRYING_LOCKED/STOWED_LOCKED 발행 전 controller fault
+   확인은 브릿지에 해당 필드가 없어 미포함(별도 후속 과제).
 """
 from enum import Enum, auto
 
@@ -65,13 +118,17 @@ ARM_JOINT_NAMES = ['joint_1', 'joint_2', 'joint_3']
 # ──────────────────────────────────────────────
 from dynamixel_control.contract import (       # noqa: E402
     ARRIVED_PICKUP, ARRIVED_DROP,
-    ARM_IDLE, ARM_PERCEIVING, ARM_PLANNING, ARM_EXECUTING,
-    ARM_CARRYING, ARM_DONE, ARM_FAILED,
-    LOCK_MODES, MODE_DRIVING, HEARTBEAT_RATE_HZ,
+    ARM_PERCEIVING, ARM_PLANNING, ARM_EXECUTING, ARM_FAILED,
+    ARM_WORK_READY, ARM_STOWING, ARM_STOWED_LOCKED, ARM_CARRYING_LOCKED, ARM_GRIP_LOST,
+    LOCK_MODES, MODE_MISSION_STOP, MODE_STOW_REQUEST, HEARTBEAT_RATE_HZ,
 )
 from dynamixel_control.qos_profiles import HEARTBEAT_QOS, ARRIVAL_QOS   # noqa: E402
 
-DRIVING_MODE = MODE_DRIVING
+# contract.py의 LOCK_MODES는 DRIVING을 포함한다("MISSION_STOP만 허가, 나머지 전부 잠금").
+RECOGNIZED_MODES = LOCK_MODES | {MODE_MISSION_STOP, MODE_STOW_REQUEST}
+
+# stamp freshness — 미래/역행 판정 허용오차 [s] (계약 §5.1 age 0~0.5s 기준)
+STAMP_FUTURE_TOL = 0.5
 
 # moveit_msgs/MoveItErrorCodes.SUCCESS
 MOVEIT_SUCCESS = 1
@@ -85,11 +142,22 @@ class State(Enum):
     GRASP_CHECK = auto()
     LIFT = auto()
     CARRY = auto()
-    REGRASP = auto()
+    GRIP_LOST = auto()
     RELEASE = auto()
-    DONE = auto()
-    ABORT = auto()
+    STOWING = auto()
+    STOWED_LOCKED = auto()
     LOCKED = auto()
+
+
+# 지형/주행 이벤트(LOCK_MODES)로 preempt 대상이 되는 상태 — 실제 모션/그리퍼 동작이 진행
+# 중일 수 있는 상태만. CARRY는 이미 정지-유지 상태(그리퍼 effort 감시만)라 preempt
+# 불필요 — 계약 v2 하트비트를 CARRY 자체 루프가 계속 발행해야 하므로 굳이 LOCKED로 빼지 않음.
+PREEMPTIBLE_STATES = (State.PERCEIVE, State.PLAN, State.DESCEND, State.GRASP_CHECK, State.LIFT)
+
+# STOW_REQUEST(운영자 포기·재정렬 유도)로 즉시 RELEASE→STOWING 강제 진입 가능한 상태 —
+# 작업이 진행 중이거나 래치된 모든 상태(2026-07-14 결정: GRIP_LOST 전용이었던 것을 확장).
+# IDLE/RELEASE/STOWING/STOWED_LOCKED는 이미 정지/포기 진행 중이라 대상에서 제외.
+STOW_ABORTABLE_STATES = PREEMPTIBLE_STATES + (State.CARRY, State.GRIP_LOST, State.LOCKED)
 
 
 class ArmFsmNode(Node):
@@ -127,9 +195,21 @@ class ArmFsmNode(Node):
         self.declare_parameter('grasp_effort_thresh', 80.0)   # ≈215mA, placeholder
         self.declare_parameter('drop_effort_thresh', 20.0)    # ≈54mA, placeholder
         # 동작 제어
-        self.declare_parameter('max_regrasp', 3)
         self.declare_parameter('gripper_action_time', 1.0)       # 그리퍼 동작 시간 [s]
         self.declare_parameter('tick_rate', 10.0)
+        # chassis_mode 수신 끊김 워치독 — §5.1 "수신 끊김 = default-deny(잠금 유지)"
+        self.declare_parameter('chassis_mode_timeout', 1.0)      # [s]
+        # locked 하트비트(CARRYING_LOCKED/STOWED_LOCKED) 발행 전 실제 확인 조건 — §5.1
+        # "문자열만 바꾸는 게 아니라 자세 오차·관절 속도·유지 시간을 확인한 뒤 발행".
+        # 수치는 실측 캘리브 전 placeholder(TODO). 컨트롤러 fault 확인은 브릿지에 아직
+        # 해당 필드가 없어 미포함(별도 후속 작업).
+        self.declare_parameter('locked_pos_tol', 0.005)   # [m] tip 위치 흔들림 허용치
+        self.declare_parameter('locked_vel_tol', 0.05)    # [rad/s] 관절 속도(유한차분) 허용치
+        self.declare_parameter('locked_dwell', 0.5)       # [s] 안정 유지 시간
+        # STOWING 목표 관절각(ARM_JOINT_NAMES 순서) — ⚠️ CAD 미검증 placeholder. all-zero
+        # home은 계약상 접힘 자세로 금지(구조상 충돌·역구동 위험) — 실기 검증 전까지 이
+        # 기본값으로 실제 서보를 구동하지 말 것. 실측 후 이 파라미터로 덮어쓸 것.
+        self.declare_parameter('stow_joint_positions', [0.0, -0.6, 1.2])
 
         g = self.get_parameter
         self.planning_group = g('planning_group').value
@@ -152,12 +232,25 @@ class ArmFsmNode(Node):
         self.gripper_close = g('gripper_close').value
         self.grasp_thresh = g('grasp_effort_thresh').value
         self.drop_thresh = g('drop_effort_thresh').value
-        self.max_regrasp = g('max_regrasp').value
         self.gripper_action_time = g('gripper_action_time').value
+        self.chassis_mode_timeout = g('chassis_mode_timeout').value
+        self.locked_pos_tol = g('locked_pos_tol').value
+        self.locked_vel_tol = g('locked_vel_tol').value
+        self.locked_dwell = g('locked_dwell').value
+        self.stow_joint_positions = list(g('stow_joint_positions').value)
+        if len(self.stow_joint_positions) != len(ARM_JOINT_NAMES):
+            self.get_logger().error(
+                f'stow_joint_positions 길이({len(self.stow_joint_positions)})가 '
+                f'ARM_JOINT_NAMES({len(ARM_JOINT_NAMES)})와 다름 — STOWING 모션 비활성')
+            self.stow_joint_positions = None
+        else:
+            self.get_logger().warn(
+                'stow_joint_positions는 CAD 미검증 placeholder다 — 실기 검증 없이 '
+                '이 기본값으로 실제 서보를 구동하지 말 것.')
 
         # ── 토픽/액션 I/O ─────────────────────────
-        # QoS 는 계약(contract.py) 기준. heartbeat 계열을 depth 10 으로 두면 낡은 샘플이
-        # 큐에 쌓여 파워트레인의 age(신선도) 판정이 어긋난다.
+        # QoS 는 계약(contract.py/qos_profiles.py) 기준. heartbeat 계열을 depth 10 으로
+        # 두면 낡은 샘플이 큐에 쌓여 파워트레인의 age(신선도) 판정이 어긋난다.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(DetectedObject, '/pick_target', self._on_pick_target, latched)
         self.create_subscription(ArrivalStatus, '/arrival_status', self._on_arrival, ARRIVAL_QOS)
@@ -193,13 +286,25 @@ class ArmFsmNode(Node):
         self.locked = False
         self.pick_target = None
         self.mission_id = 0
-        self.regrasp_cnt = 0
         self._joint_effort = {}            # joint_name -> effort
-        # 팔 모션(MoveIt) 진행 추적
+        # 계약 v2 — MISSION_STOP + ArrivalStatus conjunction 게이트 (순서 무관)
+        self._mission_stop_active = False
+        self._pending_arrival = None        # 아직 소비 안 한 최신 ArrivalStatus
+        self._last_arrival_stamp = None
+        self._last_chassis_stamp = None
+        self._last_chassis_recv_wall = None     # chassis_mode 마지막 수신 시각(워치독용)
+        self._last_completed_mission_id = None  # STOWED_LOCKED 도달한 mission_id (중복 재실행 방지)
+        # locked-heartbeat 실측 확인용 (_is_settled)
+        self._settle_start = None          # 안정 유지 시작 시각(불안정 감지 시 리셋)
+        self._last_settle_pos = None       # 직전 tick의 tip 위치(np.array)
+        self._last_settle_time = None
+        self._last_settle_joints = {}      # 직전 tick의 관절각 스냅샷(유한차분 속도용)
+        # 팔 모션(MoveIt/직접궤적) 진행 추적
         self._motion_state = 'idle'        # 'idle' | 'active' | 'done'
         self._motion_ok = False
         self._arm_goal_handle = None
         self._grip_sent = False            # 상태 진입 시 _transition에서 리셋
+        self._stow_move_sent = False       # 상태 진입 시 _transition에서 리셋
 
         # ── heartbeat ─────────────────────────────
         # 계약: 현재 상태를 10Hz 로 끊임없이 발행한다. 0.5초 넘게 끊기면 파워트레인이
@@ -213,7 +318,7 @@ class ArmFsmNode(Node):
         # 별도 콜백그룹인 이유: _tick 은 analytic IK 의 FK 호출에서 블로킹 대기한다.
         # 같은 그룹이면 IK 도는 동안 heartbeat 가 굶어 stale 판정을 맞는다.
         # → main() 이 MultiThreadedExecutor 로 띄운다.
-        self._status = ARM_IDLE
+        self._status = ARM_STOWED_LOCKED
         self._hb_group = MutuallyExclusiveCallbackGroup()
         self.create_timer(1.0 / HEARTBEAT_RATE_HZ, self._publish_heartbeat,
                           callback_group=self._hb_group)
@@ -230,24 +335,92 @@ class ArmFsmNode(Node):
         self.pick_target = msg
 
     def _on_arrival(self, msg):
-        self.mission_id = msg.mission_id
-        if msg.status == ARRIVED_PICKUP and self.state == State.IDLE:
-            self._transition(State.PERCEIVE)
-        elif msg.status == ARRIVED_DROP and self.state == State.CARRY:
-            self._transition(State.RELEASE)
+        if not self._stamp_is_fresh(msg.header.stamp, self._last_arrival_stamp):
+            self.get_logger().warn('ArrivalStatus stamp 무효(0/미래/역행) — 무시')
+            return
+        self._last_arrival_stamp = msg.header.stamp
+        self._pending_arrival = msg
+        self._try_advance()
 
     def _on_chassis_mode(self, msg):
-        if msg.mode in LOCK_MODES and not self.locked:
-            self.locked = True
-            if self.state not in (State.IDLE, State.LOCKED):
-                self._prev_state = self.state
-                self._cancel_arm_motion()
-                self._transition(State.LOCKED)
-        elif msg.mode == DRIVING_MODE and self.locked:
+        if not self._stamp_is_fresh(msg.header.stamp, self._last_chassis_stamp):
+            return
+        self._last_chassis_stamp = msg.header.stamp
+        self._last_chassis_recv_wall = self.get_clock().now()
+
+        if msg.mode not in RECOGNIZED_MODES:
+            # 미인식 mode — default-deny, 상태 변경 없음(락 유지)
+            self.get_logger().warn(f'미인식 chassis_mode={msg.mode!r} — 무시')
+            return
+
+        # 계약 v2: MISSION_STOP만이 유일한 언락·작업 허가. DRIVING 포함 나머지는 전부
+        # 잠금 유지 — LOCKED 탈출은 _try_advance()의 MISSION_STOP+ArrivalStatus
+        # conjunction으로만 가능(자동 언락 분기 없음).
+        self._mission_stop_active = (msg.mode == MODE_MISSION_STOP)
+
+        if msg.mode in LOCK_MODES:      # contract.py 기준 DRIVING 포함
+            self._enter_locked()
+        elif msg.mode == MODE_STOW_REQUEST and self.state in STOW_ABORTABLE_STATES:
+            # 운영자 포기/재정렬 유도 — 진행 중인 작업(또는 GRIP_LOST/LOCKED 래치) 중단하고
+            # 접어 잠금. 2026-07-14: GRIP_LOST 전용이었던 범위를 작업 중 모든 상태로 확장.
+            self._cancel_arm_motion()
             self.locked = False
-            if self.state == State.LOCKED:
-                # TODO: 취소된 모션 복구 정밀화 — 스켈레톤은 직전 상태 재진입
-                self._transition(self._prev_state or State.IDLE)
+            self._transition(State.RELEASE)
+
+        self._try_advance()
+
+    def _enter_locked(self):
+        """PREEMPTIBLE_STATES 중이면 모션 취소 후 LOCKED 진입. 이미 락이면 no-op."""
+        self.locked = True
+        if self.state in PREEMPTIBLE_STATES:
+            self._prev_state = self.state
+            self._cancel_arm_motion()
+            self._transition(State.LOCKED)
+
+    def _try_advance(self):
+        """MISSION_STOP + ArrivalStatus conjunction(순서 무관) 충족 시에만 전이.
+
+        픽업 개시: IDLE/GRIP_LOST 에서 ARRIVED_PICKUP 수신 시 PERCEIVE.
+        지형 중단 복귀: LOCKED(같은 mission_id) 에서도 동일 conjunction으로 PERCEIVE 재진입
+        (중단 시점 재개 대신 PERCEIVE부터 다시 — 중단 중 타겟이 변했을 수 있어 더 안전).
+        하역: CARRY 에서 ARRIVED_DROP(같은 mission_id) 수신 시 RELEASE.
+        이미 STOWED_LOCKED 까지 끝난 mission_id 의 재발행(중복)은 무시.
+        """
+        msg = self._pending_arrival
+        if msg is None or not self._mission_stop_active:
+            return
+
+        if self.state in (State.IDLE, State.GRIP_LOST) and msg.status == ARRIVED_PICKUP:
+            if msg.mission_id == self._last_completed_mission_id:
+                return  # 이미 완료된 mission_id 재발행 — 재실행 금지
+            self.mission_id = msg.mission_id
+            self._pending_arrival = None
+            self._set_status(ARM_WORK_READY)
+            self._transition(State.PERCEIVE)
+        elif (self.state == State.LOCKED and msg.status == ARRIVED_PICKUP
+                and msg.mission_id == self.mission_id):
+            self._pending_arrival = None
+            self.locked = False
+            self._set_status(ARM_WORK_READY)
+            self._transition(State.PERCEIVE)
+        elif (self.state == State.CARRY and msg.status == ARRIVED_DROP
+                and msg.mission_id == self.mission_id):
+            self._pending_arrival = None
+            self._transition(State.RELEASE)
+
+    def _stamp_is_fresh(self, stamp, prev_stamp):
+        """0/미래/동일·역행 stamp 거부 (계약 §5.1 heartbeat freshness 기준)."""
+        t = stamp.sec + stamp.nanosec * 1e-9
+        if t <= 0.0:
+            return False
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if t > now + STAMP_FUTURE_TOL:
+            return False
+        if prev_stamp is not None:
+            pt = prev_stamp.sec + prev_stamp.nanosec * 1e-9
+            if t <= pt:
+                return False
+        return True
 
     def _on_joint_states(self, msg):
         for i, name in enumerate(msg.name):
@@ -259,6 +432,7 @@ class ArmFsmNode(Node):
     # ── FSM tick ───────────────────────────────
 
     def _tick(self):
+        self._check_chassis_mode_watchdog()
         if (self._motion_state == 'active' and self._arm_move_deadline is not None
                 and self.get_clock().now() >= self._arm_move_deadline):
             self._motion_state = 'done'
@@ -267,12 +441,62 @@ class ArmFsmNode(Node):
         if handler:
             handler()
 
+    def _check_chassis_mode_watchdog(self):
+        """chassis_mode 수신 끊김 = default-deny(잠금 유지, §5.1)."""
+        if self._last_chassis_recv_wall is None:
+            return  # 아직 한 번도 못 받음 — IDLE 기본값(안 움직임)으로 이미 안전
+        age = (self.get_clock().now() - self._last_chassis_recv_wall).nanoseconds * 1e-9
+        if age > self.chassis_mode_timeout:
+            self._mission_stop_active = False
+            self._enter_locked()
+
+    def _is_settled(self):
+        """locked 하트비트(CARRYING_LOCKED/STOWED_LOCKED) 발행 전 실제 확인 — §5.1.
+
+        tip pose(TF, base_frame←tip_link)가 연속 tick 사이 `locked_pos_tol` 이내로
+        유지되고, 관절각 유한차분 속도가 `locked_vel_tol` 이내인 상태가 `locked_dwell`
+        초 이상 지속돼야 True. TF 조회 실패·불안정 감지 시 dwell 타이머 리셋(안전 측
+        기본값 = 미확인). ⚠️ 컨트롤러 fault 확인은 브릿지에 아직 해당 필드가 없어 미포함.
+        """
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_link, Time())
+        except TransformException:
+            self._settle_start = None
+            return False
+        t = tf.transform.translation
+        pos = np.array([t.x, t.y, t.z])
+        now = self.get_clock().now()
+
+        stable = False
+        if self._last_settle_pos is not None and self._last_settle_time is not None:
+            dt = (now - self._last_settle_time).nanoseconds * 1e-9
+            pos_delta = float(np.linalg.norm(pos - self._last_settle_pos))
+            max_joint_vel = 0.0
+            if dt > 1e-6:
+                for name in ARM_JOINT_NAMES:
+                    prev = self._last_settle_joints.get(name)
+                    cur = self._joint_position.get(name)
+                    if prev is not None and cur is not None:
+                        max_joint_vel = max(max_joint_vel, abs(cur - prev) / dt)
+            stable = (pos_delta <= self.locked_pos_tol
+                      and max_joint_vel <= self.locked_vel_tol)
+
+        self._last_settle_pos = pos
+        self._last_settle_time = now
+        self._last_settle_joints = dict(self._joint_position)
+
+        if not stable:
+            self._settle_start = None
+            return False
+        if self._settle_start is None:
+            self._settle_start = now
+        return (now - self._settle_start).nanoseconds * 1e-9 >= self.locked_dwell
+
     def _do_idle(self):
-        # ⚠️ 계약 v2 미구현 지점 — 접힘 자세(stow posture) 정의 후 여기가 바뀐다.
-        #    파워트레인은 STOWED_LOCKED / CARRYING_LOCKED 만 "주행 가능"으로 인정한다
-        #    (contract.DRIVE_READY_STATUSES). IDLE 을 아무리 성실히 발행해도 **차는 못 움직인다.**
-        #    최종 형태: 기동 시 접힘 자세로 이동(STOWING) → 자세·속도·토크 확인 → STOWED_LOCKED.
-        self._set_status(ARM_IDLE)
+        # 계약 v2: 평상시(빈손) 주행 중 상시 하트비트 — WORK_READY 아님, STOWED_LOCKED.
+        # WORK_READY는 MISSION_STOP+ArrivalStatus conjunction 수락 순간(_try_advance)의
+        # 1회성 ack로 재배치됨. (STOWING에서 settle 확인 후 넘어온 상태라 여기선 재확인 안 함)
+        self._set_status(ARM_STOWED_LOCKED)
 
     def _do_perceive(self):
         self._set_status(ARM_PERCEIVING)
@@ -324,7 +548,6 @@ class ArmFsmNode(Node):
         if self._elapsed() < self.gripper_action_time:
             return
         if self._gripper_effort() >= self.grasp_thresh:
-            self.regrasp_cnt = 0
             self._transition(State.LIFT)
         else:
             self.get_logger().warn('파지 실패(effort 미달) → 재계획')
@@ -356,23 +579,28 @@ class ArmFsmNode(Node):
             self._transition(State.CARRY)
 
     def _do_carry(self):
-        """운반 중 그리퍼 effort 감시 → 급감 시 DROP."""
-        self._set_status(ARM_CARRYING)
-        if self._elapsed() < 0.5:          # 진입 직후 dwell (오탐 방지)
+        """운반 중 그리퍼 effort 감시 → 급감 시 GRIP_LOST 래치.
+
+        `_is_settled()`(pose·관절속도·dwell 실측) 충족 전엔 `CARRYING_LOCKED` 대신
+        `EXECUTING`을 발행 — 문자열만 바꾸지 않고 실제 정지 확인 후에만 locked 하트비트.
+        """
+        self._set_status(ARM_CARRYING_LOCKED if self._is_settled() else ARM_EXECUTING)
+        if self._elapsed() < 0.5:          # 진입 직후 dwell (DROP 오탐 방지, settle과 별개)
             return
         if self._gripper_effort() < self.drop_thresh:
-            self.get_logger().warn('DROP 감지 (effort 급감)')
-            self._transition(State.REGRASP)
-        # ARRIVED_DROP 수신은 _on_arrival에서 RELEASE로 전이
+            self.get_logger().warn('DROP 감지 (effort 급감) → GRIP_LOST 래치')
+            self._cancel_arm_motion()
+            self._transition(State.GRIP_LOST)
+        # ARRIVED_DROP 은 _try_advance(MISSION_STOP conjunction)에서 RELEASE로 전이
 
-    def _do_regrasp(self):
-        self.regrasp_cnt += 1
-        self._set_status(ARM_FAILED)
-        if self.regrasp_cnt > self.max_regrasp:
-            self.get_logger().error('재파지 한계 초과 → ABORT')
-            self._transition(State.ABORT)
-        else:
-            self._transition(State.PERCEIVE)   # 파워트레인 ARRIVED_PICKUP 재발행 가정
+    def _do_grip_lost(self):
+        """supervisor-latched hold — 자동 재시도 없음(§5.1).
+
+        새 MISSION_STOP+ArrivalStatus(ARRIVED_PICKUP) conjunction이 다시 와야만
+        `_try_advance()`가 PERCEIVE로 재진입시킴. STOW_REQUEST 수신 시
+        `_on_chassis_mode`에서 RELEASE로 강제 전이(운영자 포기, `STOW_ABORTABLE_STATES`).
+        """
+        self._set_status(ARM_GRIP_LOST)
 
     def _do_release(self):
         self._set_status(ARM_EXECUTING)
@@ -381,28 +609,55 @@ class ArmFsmNode(Node):
             self._grip_sent = True
             return
         if self._elapsed() > self.gripper_action_time:
-            self._transition(State.DONE)
+            self._transition(State.STOWING)
 
-    def _do_done(self):
-        self._set_status(ARM_DONE)
+    def _do_stowing(self):
+        """접힘 자세로 이동 → `_is_settled()` 확인 후 `STOWED_LOCKED`.
+
+        `stow_joint_positions`(파라미터, CAD 미검증 placeholder)로 직접 관절궤적을
+        딱 한 번만(`_stow_move_sent`, 상태 진입당 1회) 발행한다. 모션 완료 전에
+        `_is_settled()`를 확인하면 CARRY 종료 시점의 자세가 우연히 안정적이어서 실제로
+        접히기도 전에 통과해버릴 수 있으므로, 반드시 `_motion_state=='active'`가 아닐
+        때만 settle 게이트를 본다. ⚠️ `_motion_state`를 'idle'로 되돌리면 다음 tick에
+        재발행 분기를 다시 타 dwell 누적 없이 궤적을 계속 재전송하는 버그가 있었음
+        (2026-07-15 발견·수정) — `_stow_move_sent`는 상태를 벗어날 때(`_transition`)만
+        리셋되므로 매 tick 재발행되지 않는다.
+        """
+        self._set_status(ARM_STOWING)
+        if self.stow_joint_positions is None:
+            # 목표 미설정(파라미터 길이 오류) — 접이 모션 없이 현재 자세 유지로 폴백.
+            if self._is_settled():
+                self._transition(State.STOWED_LOCKED)
+            return
+        if not self._stow_move_sent:
+            self._begin_stow_move()
+            self._stow_move_sent = True
+            return
+        if self._motion_state == 'active':
+            return
+        if self._is_settled():
+            self._transition(State.STOWED_LOCKED)
+
+    def _do_stowed_locked(self):
+        """하역 완료 최종 권위. ⚠️ 실제 locked-heartbeat 검증(dwell 등)은 TODO."""
+        self._set_status(ARM_STOWED_LOCKED)
+        self._last_completed_mission_id = self.mission_id
         self.pick_target = None
         self._transition(State.IDLE)
 
-    def _do_abort(self):
-        self._set_status(ARM_FAILED)
-        self._transition(State.IDLE)
-
     def _do_locked(self):
-        # 현재 자세 홀드: MoveIt에 새 goal 안 보냄 → 브릿지가 torque로 마지막 위치 유지.
-        # status 는 직전 값을 유지한다(heartbeat 타이머가 계속 발행하므로 침묵하지 않는다).
-        #
-        # ⚠️ 계약 v2 미구현 지점 — 여기가 STOWED_LOCKED / CARRYING_LOCKED 가 될 자리다.
-        #    파워트레인은 이 두 status 만 "주행 가능"으로 인정하므로(DRIVE_READY_STATUSES),
-        #    지금처럼 IDLE/CARRYING 을 유지하면 **차는 잠긴 채로 출발하지 못한다.**
-        #    구현하려면: 접힘 자세 정의 → 자세 근접·전 관절 velocity≈0·dwell·토크 유지·
-        #    controller fault 0 을 실제로 확인한 뒤에만 *_LOCKED 를 발행해야 한다.
-        #    (지금 브릿지는 /joint_states 에 velocity 를 싣지 않아 그 확인이 불가능하다.)
-        pass
+        """현재 자세 홀드: MoveIt에 새 goal 안 보냄 → 브릿지가 torque로 마지막 위치 유지.
+
+        계약 v2 10Hz 하트비트 요구 — LOCKED 중에도 발행을 멈추면 안 됨. `_is_settled()`
+        충족 전엔 `EXECUTING`(아직 정지 미확인), 충족 후엔 `_prev_state==LIFT`
+        (GRASP_CHECK에서 파지 확정된 뒤)면 `CARRYING_LOCKED`, 그 외(PERCEIVE/PLAN/DESCEND/
+        GRASP_CHECK 중단)는 `STOWED_LOCKED`로 근사.
+        """
+        if not self._is_settled():
+            self._set_status(ARM_EXECUTING)
+            return
+        carrying = (self._prev_state == State.LIFT)
+        self._set_status(ARM_CARRYING_LOCKED if carrying else ARM_STOWED_LOCKED)
 
     # ── MoveIt 팔 모션 ─────────────────────────
 
@@ -606,14 +861,30 @@ class ArmFsmNode(Node):
         if solution is None:
             self.get_logger().warn(f'analytic IK 실패 — 목표 도달 불가: {target_xyz}')
             return False
+        self._publish_joint_trajectory(solution, q_current)
+        self.get_logger().info(
+            f'analytic IK: {[round(v, 3) for v in solution]} rad 로 이동')
+        return True
 
-        delta = max(abs(a - b) for a, b in zip(solution, q_current))
+    def _begin_stow_move(self):
+        """`stow_joint_positions` 목표로 직접 관절궤적 발행 (MoveIt 미경유).
+
+        접힘 자세는 충돌 회피가 필요 없는 known-safe 설정값이라 가정하므로(실측 후
+        캘리브 전제), ik_mode와 무관하게 항상 `_arm_traj_pub`로 직접 명령한다 —
+        analytic IK를 거칠 필요가 없다(목표가 이미 관절각이지 xyz가 아님).
+        """
+        q_current = self._current_arm_joint_positions()
+        self._publish_joint_trajectory(self.stow_joint_positions, q_current)
+
+    def _publish_joint_trajectory(self, target_positions, q_current):
+        """목표 관절각으로 단일 포인트 궤적 발행 + 모션 진행 상태 갱신 (공통 헬퍼)."""
+        delta = max(abs(a - b) for a, b in zip(target_positions, q_current))
         duration = max(1.0, min(5.0, delta / max(self.arm_move_speed, 0.05)))
 
         traj = JointTrajectory()
         traj.joint_names = list(ARM_JOINT_NAMES)
         pt = JointTrajectoryPoint()
-        pt.positions = [float(v) for v in solution]
+        pt.positions = [float(v) for v in target_positions]
         pt.time_from_start = Duration(sec=int(duration))
         traj.points.append(pt)
         self._arm_traj_pub.publish(traj)
@@ -622,9 +893,6 @@ class ArmFsmNode(Node):
         self._motion_ok = True
         self._arm_move_deadline = self.get_clock().now() + RclpyDuration(
             seconds=duration + 0.5)
-        self.get_logger().info(
-            f'analytic IK: {[round(v, 3) for v in solution]} rad, {duration:.1f}s 예상')
-        return True
 
     # ── 그리퍼 ─────────────────────────────────
 
@@ -656,6 +924,7 @@ class ArmFsmNode(Node):
         self.state = new_state
         self._state_enter_t = self.get_clock().now()
         self._grip_sent = False
+        self._stow_move_sent = False
 
     def _set_status(self, status):
         """발행할 현재 상태를 갱신한다. 실제 발행은 _publish_heartbeat 가 전담한다.

@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""perception/debug_image → SRT 스트리밍 노드.
+"""perception 이미지 토픽 → SRT 스트리밍 노드.
 
-/perception/debug_image 토픽을 구독해 H.264/SRT 로 송신한다.
-PC 에서 power-train-sw/scripts/recv_stream.sh <port> <JetsonIP> 로 수신.
+image_topic(기본 /perception/raw_image, YOLO/오버레이와 무관한 raw 프레임)을 구독해
+H.264/SRT 로 송신한다. PC 에서 power-train-sw/scripts/recv_stream.sh <port> <JetsonIP>
+로 수신.
+
+2026-07-13 파워트레인 "계약 v2"(Notion `2026 국방로봇 자율주행 SW 전체 개발계획` §7.1
+Task6/§15) 반영 — 포트 배정: L515 :5000, **D435i raw :5002**(본 노드 기본값),
+D435i YOLO metadata UDP :5003(별도, `metadata_sender_node`). 기존 기본 포트 5000은
+L515와 충돌해 5002로 변경.
+
+로컬 디버그용으로 YOLO 오버레이(/perception/debug_image)를 스트리밍하고 싶으면
+`image_topic:=/perception/debug_image`와 겹치지 않는 `port`를 지정해서 별도 실행.
 
 실행:
     ros2 run robot_arm_perception stream_node --ros-args -p host_ip:=<젯슨IP>
-    (host_ip 는 SRT listener 주소 — 기본 0.0.0.0, 포트 5000)
+    (host_ip 는 SRT listener 주소 — 기본 0.0.0.0, 포트 5002)
 """
 import subprocess
 import threading
@@ -29,7 +38,7 @@ def _build_gst_cmd(port: int, width: int, height: int, fps: int,
              f"width={width}", f"height={height}",
              f"framerate={fps}/1",
         "!", "videoconvert", "!", "video/x-raw,format=I420",
-        "!", "x264enc", "tune=zerolatency", "speed-preset=superfast",
+        "!", "x264enc", "tune=zerolatency", "speed-preset=ultrafast", "threads=3",
              f"bitrate={bitrate_kbps}", "key-int-max=30",
         "!", "h264parse", "config-interval=-1",
         "!", "mpegtsmux", "alignment=7",
@@ -43,15 +52,17 @@ class StreamNode(Node):
     def __init__(self):
         super().__init__('stream_node')
 
-        self.declare_parameter('port', 5000)
-        self.declare_parameter('fps', 15)
+        self.declare_parameter('port', 5002)
+        self.declare_parameter('fps', 30)
         self.declare_parameter('bitrate_kbps', 3000)
         self.declare_parameter('latency_ms', 60)
+        self.declare_parameter('image_topic', '/perception/raw_image')
 
         self._port = self.get_parameter('port').value
         self._fps = self.get_parameter('fps').value
         self._bitrate = self.get_parameter('bitrate_kbps').value
         self._latency = self.get_parameter('latency_ms').value
+        self._image_topic = self.get_parameter('image_topic').value
 
         self._bridge = CvBridge()
         self._proc = None
@@ -59,10 +70,9 @@ class StreamNode(Node):
         self._width = None
         self._height = None
 
-        self.create_subscription(ImageMsg, '/perception/debug_image',
-                                 self._cb, 1)
+        self.create_subscription(ImageMsg, self._image_topic, self._cb, 1)
         self.get_logger().info(
-            f'stream_node 시작 — SRT listener :{self._port} '
+            f'stream_node 시작 — {self._image_topic} → SRT listener :{self._port} '
             f'(PC에서: scripts/recv_stream.sh {self._port} <JetsonIP>)')
 
     def _ensure_proc(self, width: int, height: int):
