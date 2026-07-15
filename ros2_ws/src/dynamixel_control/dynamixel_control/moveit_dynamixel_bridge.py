@@ -11,6 +11,8 @@ from std_msgs.msg import Bool
 from control_msgs.action import FollowJointTrajectory
 from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncWrite, GroupSyncRead
 
+from dynamixel_control.gripper_presets import DEFAULT_GRIPPER, get_preset
+
 
 ADDR_TORQUE_ENABLE = 64
 ADDR_HARDWARE_ERROR_STATUS = 70
@@ -45,11 +47,13 @@ DXL_CENTER_POSITION = 2048
 TICKS_PER_RAD = 4096.0 / (2.0 * math.pi)
 
 
-# 팔 관절 ↔ 다이나믹셀 ID 매핑. (현재 3개만 — 팔 DOF 확정 시 joint_4~ 추가, CLAUDE.md §8)
+# 팔 관절 ↔ 다이나믹셀 ID 매핑. (현재 3개만 — 팔 DOF 확정 시 arm_joint_4~ 추가, CLAUDE.md §8)
+# 조인트 이름은 2026-07-15 Isaac Sim 기반 재export(robotarm_urdf_20260711.urdf) 기준
+# (arm_joint_1~5) — 기존 fusion2urdf 계열(joint_1~5)에서 갈아탐.
 JOINT_CONFIG = {
-    "joint_1": {"id": 0, "center": 2048, "direction": 1},
-    "joint_2": {"id": 1, "center": 2048, "direction": 1},
-    "joint_3": {"id": 2, "center": 2048, "direction": 1},
+    "arm_joint_1": {"id": 0, "center": 2048, "direction": 1},
+    "arm_joint_2": {"id": 1, "center": 2048, "direction": 1},
+    "arm_joint_3": {"id": 2, "center": 2048, "direction": 1},
 }
 
 
@@ -65,13 +69,19 @@ class MoveItDynamixelBridge(Node):
     def __init__(self):
         super().__init__("moveit_dynamixel_bridge")
 
-        # --- 그리퍼 파라미터 (단일 서보 양 핑거 미러링; 실하드웨어 확정 후 런치/CLI로 조정) ---
-        self.declare_parameter("gripper_joints", ["left_finger_joint", "right_finger_joint"])
-        self.declare_parameter("gripper_ids", [5])          # 미정 → 기본 1개. 빈 배열이면 그리퍼 비활성
-        self.declare_parameter("gripper_open_m", 0.02)      # prismatic 핑거 열림 [m]
-        self.declare_parameter("gripper_close_m", 0.0)      # 닫힘 [m]
-        self.declare_parameter("gripper_open_tick", 2400)   # placeholder — 실측 캘리브 필요
-        self.declare_parameter("gripper_close_tick", 2048)  # placeholder — 실측 캘리브 필요
+        # --- 그리퍼 파라미터 (단일 서보 양 핑거 미러링) ---
+        # gripper_type 이 gripper_presets.GRIPPER_PRESETS 의 기본값을 고르고,
+        # 아래 개별 파라미터는 필요 시 CLI/런치로 여전히 개별 오버라이드 가능.
+        self.declare_parameter("gripper_type", DEFAULT_GRIPPER)
+        self.gripper_type = self.get_parameter("gripper_type").value
+        preset = get_preset(self.gripper_type, self.get_logger())
+
+        self.declare_parameter("gripper_joints", preset["gripper_joints"])
+        self.declare_parameter("gripper_ids", preset["gripper_ids"])  # 빈 배열이면 그리퍼 비활성
+        self.declare_parameter("gripper_open_m", preset["gripper_open_m"])
+        self.declare_parameter("gripper_close_m", preset["gripper_close_m"])
+        self.declare_parameter("gripper_open_tick", preset["gripper_open_tick"])
+        self.declare_parameter("gripper_close_tick", preset["gripper_close_tick"])
 
         self.gripper_joints = list(self.get_parameter("gripper_joints").value)
         self.gripper_ids = list(self.get_parameter("gripper_ids").value)
@@ -166,7 +176,7 @@ class MoveItDynamixelBridge(Node):
 
         self.get_logger().info(
             f"MoveIt Dynamixel bridge started (arm={list(JOINT_CONFIG)}, "
-            f"gripper_ids={self.gripper_ids})"
+            f"gripper_type={self.gripper_type}, gripper_ids={self.gripper_ids})"
         )
 
     # ------------------------------------------------------------------ helpers
@@ -290,7 +300,7 @@ class MoveItDynamixelBridge(Node):
         if trajectory.points:
             point = trajectory.points[-1]
             name_to_pos = dict(zip(trajectory.joint_names, point.positions))
-            # 단일 서보 미러링: 대표 핑거 관절 위치 하나만 사용
+            # 단일 구동 조인트(gripper_drive_joint)만 사용 — 나머지 8개는 URDF mimic으로 종속
             target_m = None
             for jn in self.gripper_joints:
                 if jn in name_to_pos:
