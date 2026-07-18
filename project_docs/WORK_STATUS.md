@@ -1,11 +1,100 @@
 # 작업 인수인계 지시서
 
 > **대상**: 다음 Claude Code 세션  
-> **최종 업데이트**: 2026-07-13 (`feat/gripper-fsm-modular` — dynamixel_control 그리퍼 preset 모듈화)  
+> **최종 업데이트**: 2026-07-16 (`feat/contract-v2-arm-fsm` — origin/main 재합류 2차: PR #20 `feat/gripper-fsm-modular`(URDF Isaac Sim 전면 교체 + `gripper_presets.py`) 병합, 조인트명/tip_link/그리퍼 파라미터 재적용. 아래 최상단 섹션 참고. `main`엔 아직 미병합)  
 > **기준 문서**: `/home/jo/ros2_ws/CLAUDE.md` (전체 통합 계획)  
 > **레포 경로**: `/home/jo/ros2_ws/extreme-robot/`  
 > **ROS2 소스**: `extreme-robot/ros2_ws/src/`
 
+---
+
+## 서보 디버깅 스크립트 정리 (2026-07-15)
+
+HW-7 섹션(216행)의 "다음 세션 확인 포인트 — `check_servo.py` 등을 삭제할지 편입할지"를
+해결. `check_servo.py`/`diag_servo.py`/`fix_servo.py`/`fix_servo2.py`/`move_servo.py` 5개는
+전부 ID=0 서보 하드코딩 + Operating Mode·Position Limit 복구(HW-2~6 세션 당시 이상 대응)용
+1회성 스크립트로, 이후 HW-7·HW-8·STOWING 세션에서 해당 서보들이 정상 동작해 문제가 재현되지
+않아 삭제. `capture_pick.py`(범용 디버그 스냅샷)·`hw7_gripper_bottle_test.py`(그리퍼 캘리브값
+280°/215° 출처, `moveit_dynamixel_bridge`에 아직 반영 전이라 유지)·`measure_position_error.py`
+(범용 perception 정확도 측정)는 계속 사용 중이라 유지.
+
+---
+
+## `feat/contract-v2-arm-fsm` 브랜치 origin/main 재합류 + 실제 STOWING 모션 구현 (2026-07-15)
+
+이전 세션들이 `feat/contract-v2-arm-fsm` 브랜치에서 계약 v2 FSM(conjunction 게이트·
+`GRIP_LOST` 래치·`_is_settled()` 등)을 독립적으로 작업하는 동안, **같은 시기에 `main`에
+PR #15(그리퍼 URDF 모듈화 + YOLO 재학습 모델)·#16(Jetson GPU compose 분리)·#17(파워트레인
+DDS `ipc:host` 복구 + `arm_status` heartbeat + `contract.py`/`qos_profiles.py` 단일 출처
+신설)이 각각 병합되어 로컬 `main`이 origin보다 19커밋 뒤처져 있었음. 특히 PR #17이
+`arm_fsm_node.py`를 이 브랜치와 무관하게 독립적으로 다시 손대(계약 v2 상태/게이트 로직이
+없는 이전 버전 위에 heartbeat 인프라만 추가) 두 버전이 같은 파일을 서로 다른 방향으로
+크게 바꿔놓은 상태였음 — 단순 `git merge`로는 자동 해결 불가.
+
+**해결 방식**: 로컬 `main`을 origin과 fast-forward 동기화 → 새 base(origin/main) 위에
+브랜치를 다시 만들고, 우리 브랜치의 로직을 파일별로 수동 재적용(기존 `feat/contract-v2-arm-fsm`은
+`feat/contract-v2-arm-fsm-old`로 백업 보존).
+
+### `arm_fsm_node.py` 재적용
+- PR #17의 heartbeat 아키텍처(`_set_status()`/`_publish_heartbeat()` 타이머 분리,
+  `MultiThreadedExecutor` + 콜백그룹, `contract.py`/`qos_profiles.py` 단일 출처)는 그대로 두고,
+  그 위에 계약 v2 FSM 로직(MISSION_STOP+ArrivalStatus conjunction 게이트, `GRIP_LOST`
+  완전 래치, `STOW_ABORTABLE_STATES`, mission_id 멱등성, stamp freshness, chassis_mode
+  워치독, `_is_settled()`)을 재적용.
+- **`LOCK_MODES`를 `contract.py` 것으로 통일**(기존엔 이 파일이 로컬로 `DRIVING`을 제외한
+  부분집합을 따로 들고 있었음) — `contract.py`(파워트레인 것과 짝인 단일 출처)는 `DRIVING`도
+  포함한다. 즉 이제 PERCEIVE~LIFT 중 `DRIVING` 수신 시에도 `_enter_locked()`가 걸린다
+  ("MISSION_STOP만 허가, 나머지 전부 잠금"을 문자 그대로 적용 — PR #17이 지적했던 "DRIVING에서
+  자동 언락되는 버그"는 애초에 이 파일에 그 분기가 없어 해당 없음, `_try_advance()`의
+  conjunction으로만 탈출).
+- **`STOWING` 실제 접이 모션 신규 구현**(`_begin_stow_move`) — 이전엔 스켈레톤이라 현재 자세
+  그대로 `_is_settled()`만 확인했음(모션이 없어 "접힘 검증"이 아니라 "정지 검증"에 불과).
+  이제 `stow_joint_positions` 파라미터가 정의하는 목표 관절각으로
+  `/arm_controller/joint_trajectory`에 직접 궤적 발행 → 완료 후 `_is_settled()` 게이트 →
+  `STOWED_LOCKED`. ⚠️ **`stow_joint_positions` 기본값은 CAD 미검증 placeholder다.** 계약상
+  all-zero home을 접힘 자세로 쓰는 건 금지(PR #17 회신) — 그래서 0이 아닌 임의값을
+  넣어뒀지만 실제 안전 각도인지는 실기 검증 전까지 모른다. **실기 검증 없이 이 기본값으로
+  실제 서보를 구동하지 말 것.**
+- **버그 발견·수정**: `_do_stowing`이 모션 완료(`motion_state='done'`) 후 바로 `'idle'`로
+  되돌리는데, 다음 tick에서 이게 다시 `_begin_stow_move()`를 재호출해 `_is_settled()`의
+  dwell 타이머가 절대 누적되지 못하고 궤적이 계속(~2.7초 주기) 재발행되는 문제를 스모크테스트
+  중 발견. `_grip_sent`와 같은 패턴의 상태-진입당-1회 플래그 `_stow_move_sent`(`_transition()`에서
+  리셋)로 수정 — 모션은 상태 진입당 한 번만 발행되고, 이후 tick은 `_is_settled()`만 폴링.
+
+**검증 완료 (컨테이너)**:
+```bash
+colcon build   # 전체 워크스페이스 6개 패키지 성공
+```
+- `arm_fsm` 기동 확인, heartbeat 10.0Hz 안정 발행(`ros2 topic hz /arm_status`).
+- 표적 스모크테스트(`RELEASE`로 강제 진입 → `STOWING` → `STOWED_LOCKED`, identity TF
+  `base_link↔Link4_1_1` 임시 발행): `/arm_controller/joint_trajectory`에 `stow_joint_positions`
+  목표로 **정확히 1회** 궤적 발행 확인(버그 수정 전엔 반복 재발행), `_is_settled()` dwell(0.5s)
+  통과 후 `STOWED_LOCKED` 전이 확인.
+
+### perception 쪽 재적용
+`robot_arm_perception/perception_node.py`도 이 브랜치(캡처/추론 스레드 분리 + `D435_SERIAL`
+하드코딩 + `depth_img is None` 가드 수정 + `/perception/raw_image`)와 origin/main(PR #15의
+재학습 모델 기본값 교체 + detect-only 폴백 색상마스크 + 디버그 오버레이 yaw 시각화)이 각각
+독립적으로 바꿔놓은 상태라 동일하게 수동 재적용:
+- `perception_node.py`: origin/main 버전(재학습 모델·색상마스크 폴백·yaw 오버레이) 위에
+  캡처/추론 스레드 분리 + `D435_SERIAL` + `depth_img` 가드 + `/perception/raw_image` 재적용.
+- `stream_node.py`: `image_topic` 파라미터(기본 `/perception/raw_image`)·포트 5000→5002·
+  fps 15→30·x264 `ultrafast`+`threads=3` 재적용(origin/main엔 이 변경이 전혀 없었음 —
+  여전히 `/perception/debug_image`·포트 5000·fps 15 상태였음).
+- `metadata_sender_node.py`: origin/main에 아예 없어서 파일 그대로 복원 + `setup.py`
+  entry_point 재등록.
+
+**검증**: `colcon build`(robot_arm_perception 단독 + 전체) 성공, 3개 노드
+(`perception_node`/`stream_node`/`metadata_sender_node`) 모두 import·실행파일 생성 확인.
+
+### 남은 것 (이번 세션 범위 밖)
+- 컨트롤러 fault 확인 — 브릿지(`moveit_dynamixel_bridge.py`)에 해당 필드 없음, 미포함.
+- 브릿지가 `/joint_states`에 `PRESENT_VELOCITY`(SyncRead 범위엔 이미 포함되어 있음, 파싱만
+  안 함)를 안 실음 — `_is_settled()`는 위치 유한차분으로 자체 계산해 우회하므로 당장 blocking은
+  아니지만, 정식 velocity 필드 파싱은 여전히 별도 과제.
+- `stow_joint_positions` 실측 캘리브(CAD/실기 검증) — 위 경고 참고.
+- URDF 조인트 명명 불일치(`Revolute 23/29/42/48/72` vs `joint_1~N`)는 이번 세션 범위 밖으로
+  보류(다른 곳에서 별도 진행 중이라고 전달받음).
 ---
 
 ## 그리퍼 preset 기반 FSM/브릿지 모듈화 (2026-07-13, 브랜치 `feat/gripper-fsm-modular`)
