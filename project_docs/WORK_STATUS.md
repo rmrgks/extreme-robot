@@ -1,10 +1,22 @@
 # 작업 인수인계 지시서
 
 > **대상**: 다음 Claude Code 세션  
-> **최종 업데이트**: 2026-07-13 (`20260708_YOLO_URDF_Change`를 `Gripper_YOLO_FSM`으로 merge — YOLO 재학습 seg 모델 교체·검증 + HW-7/8 실기 검증 + 그리퍼 URDF 모듈화 통합)  
+> **최종 업데이트**: 2026-07-13 (`feat/gripper-fsm-modular` — dynamixel_control 그리퍼 preset 모듈화)  
 > **기준 문서**: `/home/jo/ros2_ws/CLAUDE.md` (전체 통합 계획)  
 > **레포 경로**: `/home/jo/ros2_ws/extreme-robot/`  
 > **ROS2 소스**: `extreme-robot/ros2_ws/src/`
+
+---
+
+## 그리퍼 preset 기반 FSM/브릿지 모듈화 (2026-07-13, 브랜치 `feat/gripper-fsm-modular`)
+
+`upstream/main`(PR #15 `Gripper_YOLO_FSM`)을 로컬 main에 merge하는 과정에서 발견: `robot_arm_moveit_config`(SRDF/controllers/joint_limits/initial_positions/ros2_control.xacro)는 전부 `gripper_a_joint5`/`gripper_a_joint6`로 이미 정합돼 있는데, 실서보를 구동하는 `dynamixel_control`의 `moveit_dynamixel_bridge.py`/`arm_fsm_node.py` 두 노드는 여전히 옛 이름 `left_finger_joint`/`right_finger_joint`를 `gripper_joints` 기본값으로 쓰고 있었음 — 이 상태로 실행하면 `/gripper_controller`가 실제 URDF 조인트와 이름이 안 맞아 그리퍼가 안 움직이는 상태였음.
+
+- **신규 공유 모듈** `dynamixel_control/dynamixel_control/gripper_presets.py`: `GRIPPER_PRESETS` dict(그리퍼 이름 → 조인트명/서보ID/틱 캘리브/전류 임계값/동작시간)을 두 노드가 공용으로 import. 그리퍼 설정이 두 파일에 각각 하드코딩돼 있던 게 이번 이름 불일치의 근본 원인이라, 앞으로 `gripper_b` 등을 추가할 때도 이 preset에 항목만 추가하면 되도록 구조화(URDF의 `xacro:arg gripper` 모듈화 패턴에 대응).
+- 두 노드에 `gripper_type` 파라미터(기본 `gripper_a`) 신설 — preset에서 기본값을 가져오되, 기존처럼 `-p gripper_ids:=...` 등 개별 CLI 오버라이드는 그대로 동작.
+- **HW-8 실측 틱 값 반영**: `gripper_open_tick`/`gripper_close_tick`을 placeholder(2400/2048)에서 HW-8에서 실측한 2446(215°)/3186(280°)로 교체 — 아래 HW-8 섹션에 남아있던 TODO 해소.
+- `gripper_open_m`/`gripper_close_m`/`grasp_effort_thresh`/`drop_effort_thresh`는 여전히 placeholder — 실측 캘리브 필요.
+- **검증**: 컨테이너가 안 떠 있어 `colcon build`/`ros2 run` 실기 검증은 못 함 — Python 문법(`ast.parse`)만 확인. 다음 세션에서 컨테이너 안에서 `colcon build --packages-select dynamixel_control` + `ros2 run dynamixel_control moveit_dynamixel_bridge --ros-args -p gripper_type:=gripper_a` 기동 후 `/joint_states`에 `gripper_a_joint5`/`gripper_a_joint6`로 발행되는지 확인 필요.
 
 ---
 
@@ -93,10 +105,10 @@ HW-7 다음 세션. 그리퍼 단독(병 인식→닫기/없음→열기) 반응
 - **다음 세션 확인 포인트**:
   1. 그리퍼 각도(280°/215°)가 실제 파지 대상(병)에 맞는 stroke인지 재확인 (지금은 열림/닫힘
      반응 로직 검증 목적으로 임의 조정한 값).
-  2. `moveit_dynamixel_bridge.py`의 `gripper_open_tick`(2400)/`gripper_close_tick`(2048)
-     placeholder를 이번 실측값(2446/3186)으로 갱신할지, 그리고 그 브릿지의 즉시-이동 방식
-     (Profile Accel/Velocity 미설정)에도 동일한 과부하 트립 위험이 있는지 점검 — 브릿지는
-     아직 이 세션에서 발견한 Profile 이슈를 반영하지 않음.
+  2. ✅ `moveit_dynamixel_bridge.py`의 `gripper_open_tick`(2400)/`gripper_close_tick`(2048)
+     placeholder를 이번 실측값(2446/3186)으로 갱신 완료 (2026-07-13, `gripper_presets.py` 참고).
+     단, 그 브릿지의 즉시-이동 방식(Profile Accel/Velocity 미설정)에도 동일한 과부하 트립
+     위험이 있는지는 아직 미점검 — 브릿지는 아직 이 세션에서 발견한 Profile 이슈를 반영하지 않음.
   3. `hw7_gripper_bottle_test.py`는 현재 ros2_ws root의 미추적 독립 스크립트 — 계속 쓸 거면
      `dynamixel_control` 패키지 정식 유틸로 편입 검토.
 

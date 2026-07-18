@@ -1,21 +1,16 @@
 <?xml version="1.0"?>
-<!-- 그리퍼 모듈화 메인 xacro: 몸체(robot_arm.urdf) + 그리퍼(urdf/grippers/*.xacro)를 조립.
-     그리퍼 모듈화 가이드(§4)의 sirumi.urdf.xacro 패턴을 그대로 적용.
-     robot_arm.urdf는 <robot> 태그를 가진 완성 URDF지만, xacro:include는 루트 태그 이름과
-     무관하게 자식 엘리먼트를 그대로 이 파일의 <robot>에 이어붙이므로 별도 body-only 파일 없이 재사용 가능.
-     wrist_to_gripper 조인트의 origin은 module_connector_5axis_Component41_1(팔 끝단) 원점 기준
-     실측 마운트 위치(x=147.544mm, y=0, z=239.50mm, base_link 기준)에서 역산한 값 — CAD 실측 재확인 필요. -->
+<!-- 메인 xacro: robot_arm.urdf(2026-07-15 VerNOmiddle 통합 재export 기준, 팔+gripper_a 전체가
+     이미 하나의 tree)를 그대로 include. robot_arm.urdf는 <robot> 태그를 가진 완성 URDF지만,
+     xacro:include는 루트 태그 이름과 무관하게 자식 엘리먼트를 그대로 이 파일의 <robot>에 이어붙임.
+
+     이전엔 여기서 xacro:arg gripper로 그리퍼 모듈(urdf/grippers/*.xacro)을 골라 wrist_to_gripper
+     fixed joint로 짜맞췄으나, 서로 다른 CAD export(팔/그리퍼 각각 다른 리비전)의 좌표계를 맞추는
+     시도가 반복적으로 어긋나 폐기(2026-07-15, 사용자 결정) — robot_arm.urdf 헤더 주석 참고.
+     그리퍼 "모듈화"는 이제 로직 레벨(dynamixel_control의 gripper_type/gripper_presets.py)에서만
+     유지되고, URDF 레벨 스왑은 없음. 그리퍼를 실제로 교체하려면 robot_arm.urdf 자체를 새 통합
+     export로 다시 만들어야 함(urdf/grippers/ 디렉토리는 더 이상 사용 안 함). -->
 <robot name="robot_arm" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <xacro:arg name="gripper" default="gripper_a"/>
-
   <xacro:include filename="$(find robot_arm_description)/urdf/robot_arm.urdf"/>
-  <xacro:include filename="$(find robot_arm_description)/urdf/grippers/$(arg gripper).xacro"/>
-
-  <joint name="wrist_to_gripper" type="fixed">
-    <origin xyz="0.136594 0.074544 0.0" rpy="0 0 0"/>
-    <parent link="module_connector_5axis_Component41_1"/>
-    <child link="$(arg gripper)_base_link"/>
-  </joint>
 
 </robot>
