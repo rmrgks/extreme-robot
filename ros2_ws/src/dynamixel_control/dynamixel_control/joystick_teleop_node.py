@@ -70,7 +70,7 @@ class JoystickTeleop(Node):
         self.declare_parameter('mode_button', 10)        # PS — DRIVE/ARM 전환(스텁)
 
         # ── 그리퍼 (이번 범위 제외 — 자리만 예약) ──
-        # 그리퍼는 moveit_dynamixel_bridge 가 이미 같은 서보(id 5)를 구동한다.
+        # 그리퍼는 moveit_dynamixel_bridge 가 이미 같은 서보(랙피니언 2모터 id 3,4)를 구동한다.
         # 여기서 또 구동하면 같은 버스의 같은 서보를 두 노드가 만지게 된다(owner 중복).
         # 배선하려면 그리퍼 경로를 한 곳으로 먼저 정리할 것.
         # ⚠️ 그때 반드시: Profile Acceleration(108)/Velocity(112) 를 25/80 으로 설정할 것.
